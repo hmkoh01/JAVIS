@@ -104,12 +104,20 @@ def initialize_database():
         # backend 디렉토리를 Python 경로에 추가
         backend_path = Path("backend")
         if backend_path.exists():
-            sys.path.insert(0, str(backend_path))
+            # backend 디렉토리를 절대 경로로 추가
+            backend_abs_path = backend_path.absolute()
+            if str(backend_abs_path) not in sys.path:
+                sys.path.insert(0, str(backend_abs_path))
             
-            from database.connection import create_tables
-            create_tables()
-            print("✅ 데이터베이스가 초기화되었습니다.")
-            return True
+            try:
+                from database.connection import create_tables
+                create_tables()
+                print("✅ 데이터베이스가 초기화되었습니다.")
+                return True
+            except ImportError as import_error:
+                print(f"❌ database.connection 모듈을 찾을 수 없습니다: {import_error}")
+                print("backend/database/connection.py 파일이 존재하는지 확인하세요.")
+                return False
         else:
             print("❌ backend 디렉토리를 찾을 수 없습니다.")
             return False
