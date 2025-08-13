@@ -1,90 +1,65 @@
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import os
 from ..base_agent import BaseAgent, AgentResponse
-from .rag_engine import RAGEngine
-from .embedder import Embedder
-from .vector_store import MilvusVectorStore
-from .graph_store import Neo4jGraphStore
-from .tools import ToolManager, ToolResult
+from .multimodal_rag_engine import MultimodalRAGEngine
+from .image_processor import ImageProcessor
+from database.connection import get_db_session
 from config.settings import settings
 
 class ChatbotAgent(BaseAgent):
-    """RAG 기반 챗봇 에이전트 with React Framework Tools"""
+    """멀티모달 RAG 기반 챗봇 에이전트 with Gemini API"""
     
     def __init__(self):
         super().__init__(
-            agent_type="chatbot",
-            description="RAG 기반으로 지식베이스에서 관련 정보를 검색하고 다양한 도구를 사용하여 답변을 생성합니다."
+            agent_type="multimodal_chatbot",
+            description="멀티모달 RAG 기반으로 이미지와 텍스트를 통합하여 답변을 생성합니다."
         )
         self.rag_engine = None
-        self.tool_manager = None
+        self.image_processor = None
         self._initialize_components()
     
     def _initialize_components(self):
-        """RAG 엔진과 도구들을 초기화합니다."""
+        """멀티모달 RAG 엔진과 이미지 프로세서를 초기화합니다."""
         try:
-            # 임베딩 모델 초기화
-            embedder = Embedder(
-                model_name=settings.OPENAI_MODEL,
-                openai_api_key=settings.OPENAI_API_KEY,
-                ollama_base_url=settings.OLLAMA_BASE_URL,
-                ollama_model=settings.OLLAMA_MODEL
-            )
+            # 데이터베이스 세션 생성
+            db_session = get_db_session()
             
-            # 벡터 스토어 초기화
-            vector_store = MilvusVectorStore(
-                host=settings.MILVUS_HOST,
-                port=settings.MILVUS_PORT,
-                collection_name=settings.MILVUS_COLLECTION,
-                dimension=embedder.get_embedding_dimension()
-            )
+            # 멀티모달 RAG 엔진 초기화
+            self.rag_engine = MultimodalRAGEngine(db_session)
             
-            # 그래프 스토어 초기화
-            graph_store = Neo4jGraphStore(
-                uri=settings.NEO4J_URI,
-                username=settings.NEO4J_USERNAME,
-                password=settings.NEO4J_PASSWORD
-            )
-            
-            # RAG 엔진 초기화
-            self.rag_engine = RAGEngine(
-                vector_store=vector_store,
-                graph_store=graph_store,
-                embedder=embedder
-            )
-            
-            # 도구 관리자 초기화
-            self.tool_manager = ToolManager(self.rag_engine)
+            # 이미지 프로세서 초기화
+            self.image_processor = ImageProcessor(db_session)
             
         except Exception as e:
-            print(f"챗봇 에이전트 초기화 오류: {e}")
+            print(f"멀티모달 챗봇 에이전트 초기화 오류: {e}")
     
     async def process(self, user_input: str, user_id: Optional[int] = None) -> AgentResponse:
         """사용자 입력을 처리합니다."""
         try:
-            # 1. 적절한 도구 선택
-            selected_tool = self.tool_manager.select_best_tool(user_input)
+            # 멀티모달 RAG 엔진을 사용하여 쿼리 처리
+            result = self.rag_engine.process_query_with_images(user_input, top_k=3)
             
-            # 2. 도구 실행
-            tool_result = await self._execute_tool(selected_tool, user_input)
-            
-            # 3. 결과 처리 및 응답 생성
-            if tool_result.success:
-                response_content = self._format_tool_response(tool_result, user_input)
+            if result['success']:
+                response_content = self._format_response(result)
                 
                 return AgentResponse(
                     success=True,
                     content=response_content,
                     agent_type=self.agent_type,
                     metadata={
-                        "tool_used": selected_tool,
-                        "tool_result": tool_result.metadata,
+                        "query": user_input,
+                        "relevant_images_count": len(result['relevant_images']),
+                        "context_text": result['context_text'],
                         "user_id": user_id
                     }
                 )
             else:
-                # 도구 실행 실패 시 기본 RAG 검색 시도
-                return await self._fallback_rag_search(user_input, user_id)
+                return AgentResponse(
+                    success=False,
+                    content=result['response'],
+                    agent_type=self.agent_type
+                )
                 
         except Exception as e:
             return AgentResponse(
@@ -93,113 +68,57 @@ class ChatbotAgent(BaseAgent):
                 agent_type=self.agent_type
             )
     
-    async def _execute_tool(self, tool_name: str, user_input: str) -> ToolResult:
-        """도구를 실행합니다."""
-        try:
-            if tool_name == "database_search":
-                return await self.tool_manager.execute_tool(
-                    tool_name, 
-                    query=user_input,
-                    search_type="hybrid",
-                    top_k=5
-                )
-            
-            elif tool_name == "internet_search":
-                return await self.tool_manager.execute_tool(
-                    tool_name,
-                    query=user_input,
-                    max_results=5
-                )
-            
-            elif tool_name == "email":
-                # 이메일 도구는 특별한 처리가 필요
-                return await self._handle_email_tool(user_input)
-            
-            elif tool_name == "external_api":
-                # 외부 API 도구는 특별한 처리가 필요
-                return await self._handle_external_api_tool(user_input)
-            
-            else:
-                return ToolResult(
-                    success=False,
-                    content=f"지원하지 않는 도구입니다: {tool_name}",
-                    tool_name=tool_name,
-                    metadata={"error": "Unsupported tool"},
-                    timestamp=datetime.utcnow()
-                )
-                
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                content=f"도구 실행 중 오류가 발생했습니다: {str(e)}",
-                tool_name=tool_name,
-                metadata={"error": str(e)},
-                timestamp=datetime.utcnow()
-            )
-    
-    async def _handle_email_tool(self, user_input: str) -> ToolResult:
-        """이메일 도구를 처리합니다."""
-        # 간단한 키워드 기반 이메일 작업 감지
-        input_lower = user_input.lower()
+    def _format_response(self, result: Dict[str, Any]) -> str:
+        """응답을 사용자 친화적으로 포맷합니다."""
+        response_parts = []
         
-        if any(keyword in input_lower for keyword in ["보내", "전송", "send"]):
-            # 이메일 전송 모드
-            # 실제 구현에서는 더 정교한 파싱이 필요
-            return await self.tool_manager.execute_tool(
-                "email",
-                action="send",
-                to_email="example@example.com",  # 실제로는 파싱 필요
-                subject="JAVIS AI Assistant",
-                body="이메일 내용"
-            )
-        else:
-            # 이메일 읽기 모드
-            return await self.tool_manager.execute_tool(
-                "email",
-                action="read",
-                max_emails=5
-            )
+        # 주요 응답
+        response_parts.append(result['response'])
+        
+        # 관련 이미지 정보 추가
+        if result['relevant_images']:
+            response_parts.append("\n\n참고 이미지:")
+            for i, image in enumerate(result['relevant_images'], 1):
+                response_parts.append(f"{i}. {image.filename}")
+                if image.visual_description:
+                    response_parts.append(f"   설명: {image.visual_description}")
+                if image.extracted_text:
+                    response_parts.append(f"   추출된 텍스트: {image.extracted_text[:100]}...")
+        
+        return "\n".join(response_parts)
     
-    async def _handle_external_api_tool(self, user_input: str) -> ToolResult:
-        """외부 API 도구를 처리합니다."""
-        # 간단한 예시 - 실제로는 더 정교한 파싱이 필요
-        if "weather" in user_input.lower() or "날씨" in user_input:
-            # 날씨 API 호출 예시
-            return await self.tool_manager.execute_tool(
-                "external_api",
-                api_url="https://api.openweathermap.org/data/2.5/weather",
-                method="GET",
-                params={
-                    "q": "Seoul",
-                    "appid": "your_api_key",  # 실제로는 설정에서 가져와야 함
-                    "units": "metric"
-                }
-            )
-        else:
-            # 기본 API 호출
-            return await self.tool_manager.execute_tool(
-                "external_api",
-                api_url="https://httpbin.org/get",
-                method="GET"
-            )
-    
-    async def _fallback_rag_search(self, user_input: str, user_id: Optional[int]) -> AgentResponse:
-        """도구 실행 실패 시 RAG 검색을 시도합니다."""
+    async def upload_image(self, image_data: bytes, filename: str, user_id: Optional[int] = None) -> AgentResponse:
+        """이미지 업로드 및 처리"""
         try:
-            rag_response = self.rag_engine.query(user_input, top_k=3, search_type="hybrid")
+            # 이미지 유효성 검사
+            is_valid, message = self.image_processor.validate_image(image_data, filename)
+            if not is_valid:
+                return AgentResponse(
+                    success=False,
+                    content=f"이미지 검증 실패: {message}",
+                    agent_type=self.agent_type
+                )
             
-            if rag_response.sources:
-                response_content = f"검색 결과:\n\n{rag_response.answer}"
-            else:
-                response_content = "죄송합니다. 관련 정보를 찾을 수 없습니다."
+            # 이미지 처리 및 메타데이터 추출
+            metadata = self.image_processor.process_image(image_data, filename)
+            
+            # 이미지 저장
+            file_path = self.image_processor.save_image(image_data, filename)
+            
+            # 데이터베이스에 메타데이터 저장
+            image_metadata = self.image_processor.create_image_metadata_record(metadata, file_path)
             
             return AgentResponse(
                 success=True,
-                content=response_content,
+                content=f"이미지 '{filename}'이 성공적으로 업로드되고 처리되었습니다.\n"
+                       f"파일 크기: {metadata['file_size']} bytes\n"
+                       f"이미지 크기: {metadata['width']}x{metadata['height']}\n"
+                       f"추출된 텍스트: {metadata.get('extracted_text', '없음')[:100]}...",
                 agent_type=self.agent_type,
                 metadata={
-                    "tool_used": "rag_fallback",
-                    "sources_count": len(rag_response.sources),
+                    "image_id": image_metadata.id,
+                    "filename": filename,
+                    "file_path": file_path,
                     "user_id": user_id
                 }
             )
@@ -207,61 +126,197 @@ class ChatbotAgent(BaseAgent):
         except Exception as e:
             return AgentResponse(
                 success=False,
-                content=f"검색 중 오류가 발생했습니다: {str(e)}",
+                content=f"이미지 업로드 중 오류가 발생했습니다: {str(e)}",
                 agent_type=self.agent_type
             )
     
-    def _format_tool_response(self, tool_result: ToolResult, user_input: str) -> str:
-        """도구 결과를 사용자 친화적으로 포맷합니다."""
-        if tool_result.tool_name == "database_search":
-            return f"지식베이스에서 찾은 정보:\n\n{tool_result.content}"
-        
-        elif tool_result.tool_name == "internet_search":
-            return f"인터넷에서 찾은 최신 정보:\n\n{tool_result.content}"
-        
-        elif tool_result.tool_name == "email":
-            return f"이메일 작업 결과:\n\n{tool_result.content}"
-        
-        elif tool_result.tool_name == "external_api":
-            return f"외부 API 호출 결과:\n\n{tool_result.content}"
-        
-        else:
-            return tool_result.content
-    
-    def get_available_tools(self) -> List[Dict[str, str]]:
-        """사용 가능한 도구 목록을 반환합니다."""
-        if self.tool_manager:
-            return self.tool_manager.get_available_tools()
-        return []
-    
-    async def process_with_specific_tool(self, user_input: str, tool_name: str, 
-                                       **tool_params) -> AgentResponse:
-        """특정 도구를 사용하여 처리합니다."""
+    async def search_images(self, query: str, top_k: int = 5, user_id: Optional[int] = None) -> AgentResponse:
+        """이미지 검색"""
         try:
-            tool_result = await self.tool_manager.execute_tool(tool_name, **tool_params)
+            relevant_images = self.rag_engine.search_images(query, top_k)
             
-            if tool_result.success:
-                response_content = self._format_tool_response(tool_result, user_input)
+            if relevant_images:
+                response_content = f"'{query}'에 대한 검색 결과 ({len(relevant_images)}개):\n\n"
                 
+                for i, image in enumerate(relevant_images, 1):
+                    response_content += f"{i}. {image.filename}\n"
+                    response_content += f"   설명: {image.visual_description}\n"
+                    if image.extracted_text:
+                        response_content += f"   텍스트: {image.extracted_text[:100]}...\n"
+                    response_content += f"   태그: {', '.join(image.image_tags)}\n\n"
+            else:
+                response_content = f"'{query}'에 대한 관련 이미지를 찾을 수 없습니다."
+            
+            return AgentResponse(
+                success=True,
+                content=response_content,
+                agent_type=self.agent_type,
+                metadata={
+                    "query": query,
+                    "results_count": len(relevant_images),
+                    "user_id": user_id
+                }
+            )
+            
+        except Exception as e:
+            return AgentResponse(
+                success=False,
+                content=f"이미지 검색 중 오류가 발생했습니다: {str(e)}",
+                agent_type=self.agent_type
+            )
+    
+    async def create_multimodal_content(self, title: str, description: str, 
+                                      text_content: str = "", image_id: int = None,
+                                      tags: List[str] = None, category: str = "",
+                                      source: str = "", user_id: Optional[int] = None) -> AgentResponse:
+        """멀티모달 콘텐츠 생성"""
+        try:
+            multimodal_content = self.rag_engine.create_multimodal_content(
+                title=title,
+                description=description,
+                text_content=text_content,
+                image_id=image_id,
+                tags=tags,
+                category=category,
+                source=source
+            )
+            
+            if multimodal_content:
                 return AgentResponse(
                     success=True,
-                    content=response_content,
+                    content=f"멀티모달 콘텐츠가 성공적으로 생성되었습니다.\n"
+                           f"제목: {title}\n"
+                           f"타입: {multimodal_content.content_type}\n"
+                           f"카테고리: {category}",
                     agent_type=self.agent_type,
                     metadata={
-                        "tool_used": tool_name,
-                        "tool_result": tool_result.metadata
+                        "content_id": multimodal_content.id,
+                        "content_type": multimodal_content.content_type,
+                        "user_id": user_id
                     }
                 )
             else:
                 return AgentResponse(
                     success=False,
-                    content=tool_result.content,
+                    content="멀티모달 콘텐츠 생성에 실패했습니다.",
                     agent_type=self.agent_type
                 )
                 
         except Exception as e:
             return AgentResponse(
                 success=False,
-                content=f"도구 실행 중 오류가 발생했습니다: {str(e)}",
+                content=f"멀티모달 콘텐츠 생성 중 오류가 발생했습니다: {str(e)}",
                 agent_type=self.agent_type
-            ) 
+            )
+    
+    async def get_image_info(self, image_id: int, user_id: Optional[int] = None) -> AgentResponse:
+        """이미지 정보 조회"""
+        try:
+            image_metadata = self.rag_engine.get_image_by_id(image_id)
+            
+            if image_metadata:
+                response_content = f"이미지 정보:\n\n"
+                response_content += f"파일명: {image_metadata.filename}\n"
+                response_content += f"파일 크기: {image_metadata.file_size} bytes\n"
+                response_content += f"이미지 크기: {image_metadata.width}x{image_metadata.height}\n"
+                response_content += f"이미지 타입: {image_metadata.image_type}\n"
+                response_content += f"업로드 시간: {image_metadata.uploaded_at}\n\n"
+                
+                if image_metadata.visual_description:
+                    response_content += f"시각적 설명: {image_metadata.visual_description}\n\n"
+                
+                if image_metadata.extracted_text:
+                    response_content += f"추출된 텍스트: {image_metadata.extracted_text}\n\n"
+                
+                if image_metadata.detected_objects:
+                    response_content += f"감지된 객체: {', '.join(image_metadata.detected_objects)}\n\n"
+                
+                if image_metadata.image_tags:
+                    response_content += f"이미지 태그: {', '.join(image_metadata.image_tags)}\n"
+                
+                return AgentResponse(
+                    success=True,
+                    content=response_content,
+                    agent_type=self.agent_type,
+                    metadata={
+                        "image_id": image_id,
+                        "user_id": user_id
+                    }
+                )
+            else:
+                return AgentResponse(
+                    success=False,
+                    content=f"ID {image_id}에 해당하는 이미지를 찾을 수 없습니다.",
+                    agent_type=self.agent_type
+                )
+                
+        except Exception as e:
+            return AgentResponse(
+                success=False,
+                content=f"이미지 정보 조회 중 오류가 발생했습니다: {str(e)}",
+                agent_type=self.agent_type
+            )
+    
+    async def delete_image(self, image_id: int, user_id: Optional[int] = None) -> AgentResponse:
+        """이미지 삭제"""
+        try:
+            success = self.image_processor.delete_image(image_id)
+            
+            if success:
+                return AgentResponse(
+                    success=True,
+                    content=f"이미지 ID {image_id}가 성공적으로 삭제되었습니다.",
+                    agent_type=self.agent_type,
+                    metadata={
+                        "image_id": image_id,
+                        "user_id": user_id
+                    }
+                )
+            else:
+                return AgentResponse(
+                    success=False,
+                    content=f"이미지 ID {image_id} 삭제에 실패했습니다.",
+                    agent_type=self.agent_type
+                )
+                
+        except Exception as e:
+            return AgentResponse(
+                success=False,
+                content=f"이미지 삭제 중 오류가 발생했습니다: {str(e)}",
+                agent_type=self.agent_type
+            )
+    
+    def get_available_operations(self) -> List[Dict[str, str]]:
+        """사용 가능한 작업 목록을 반환합니다."""
+        return [
+            {
+                "operation": "chat",
+                "description": "멀티모달 RAG를 사용한 대화",
+                "parameters": ["user_input"]
+            },
+            {
+                "operation": "upload_image",
+                "description": "이미지 업로드 및 메타데이터 추출",
+                "parameters": ["image_data", "filename"]
+            },
+            {
+                "operation": "search_images",
+                "description": "이미지 검색",
+                "parameters": ["query", "top_k"]
+            },
+            {
+                "operation": "create_multimodal_content",
+                "description": "멀티모달 콘텐츠 생성",
+                "parameters": ["title", "description", "text_content", "image_id", "tags", "category", "source"]
+            },
+            {
+                "operation": "get_image_info",
+                "description": "이미지 정보 조회",
+                "parameters": ["image_id"]
+            },
+            {
+                "operation": "delete_image",
+                "description": "이미지 삭제",
+                "parameters": ["image_id"]
+            }
+        ] 

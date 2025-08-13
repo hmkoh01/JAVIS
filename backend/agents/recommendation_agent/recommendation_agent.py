@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from ..base_agent import BaseAgent, AgentResponse
 from database.models import User, UserInteraction, KnowledgeBase
-from database.connection import get_db
+from database.connection import get_db_session
 from tools.react_tools.web_search_tool import WebSearchTool
 
 class RecommendationAgent(BaseAgent):
@@ -62,7 +62,7 @@ class RecommendationAgent(BaseAgent):
     async def _recommend_knowledge(self, user_id: int, user_input: str) -> AgentResponse:
         """지식 기반 추천을 생성합니다."""
         try:
-            db = next(get_db())
+            db = get_db_session()
             
             # 사용자 상호작용 히스토리 분석
             user_interactions = db.query(UserInteraction).filter(
@@ -269,7 +269,7 @@ class RecommendationAgent(BaseAgent):
     async def _analyze_user_profile(self, user_id: int) -> Dict[str, Any]:
         """사용자 프로필을 분석합니다."""
         try:
-            db = next(get_db())
+            db = get_db_session()
             
             # 사용자 정보
             user = db.query(User).filter(User.id == user_id).first()

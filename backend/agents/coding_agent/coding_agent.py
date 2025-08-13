@@ -4,7 +4,7 @@ import os
 from typing import Optional
 from ..base_agent import BaseAgent, AgentResponse
 from tools.mcp_tools.file_tool import MCPFileTool
-from database.connection import get_db
+from database.connection import get_db_session
 from database.models import UserInteraction
 
 class CodingAgent(BaseAgent):

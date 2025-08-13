@@ -5,7 +5,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 from ..base_agent import BaseAgent, AgentResponse
 from database.models import User, UserInteraction, UserAnalytics
-from database.connection import get_db
+from database.connection import get_db_session
 
 class DashboardAgent(BaseAgent):
     """대시보드 에이전트"""
@@ -63,7 +63,7 @@ class DashboardAgent(BaseAgent):
     async def _generate_interaction_dashboard(self, user_id: int) -> AgentResponse:
         """상호작용 분석 대시보드를 생성합니다."""
         try:
-            db = next(get_db())
+            db = get_db_session()
             
             # 최근 30일간의 상호작용 데이터 조회
             thirty_days_ago = datetime.utcnow() - timedelta(days=30)
@@ -168,7 +168,7 @@ class DashboardAgent(BaseAgent):
     async def _generate_usage_patterns_dashboard(self, user_id: int) -> AgentResponse:
         """사용 패턴 대시보드를 생성합니다."""
         try:
-            db = next(get_db())
+            db = get_db_session()
             
             # 시간대별 사용 패턴 분석
             interactions = db.query(UserInteraction).filter(
@@ -262,7 +262,7 @@ class DashboardAgent(BaseAgent):
     async def _generate_performance_dashboard(self, user_id: int) -> AgentResponse:
         """성능 메트릭 대시보드를 생성합니다."""
         try:
-            db = next(get_db())
+            db = get_db_session()
             
             # 성능 메트릭 데이터 조회
             analytics = db.query(UserAnalytics).filter(
@@ -370,7 +370,7 @@ class DashboardAgent(BaseAgent):
     async def _get_interaction_summary(self, user_id: int) -> Dict[str, Any]:
         """상호작용 요약 정보를 반환합니다."""
         try:
-            db = next(get_db())
+            db = get_db_session()
             interactions = db.query(UserInteraction).filter(
                 UserInteraction.user_id == user_id
             ).all()
@@ -393,7 +393,7 @@ class DashboardAgent(BaseAgent):
     async def _get_usage_summary(self, user_id: int) -> Dict[str, Any]:
         """사용 패턴 요약 정보를 반환합니다."""
         try:
-            db = next(get_db())
+            db = get_db_session()
             interactions = db.query(UserInteraction).filter(
                 UserInteraction.user_id == user_id
             ).all()
@@ -415,7 +415,7 @@ class DashboardAgent(BaseAgent):
     async def _get_performance_summary(self, user_id: int) -> Dict[str, Any]:
         """성능 메트릭 요약 정보를 반환합니다."""
         try:
-            db = next(get_db())
+            db = get_db_session()
             analytics = db.query(UserAnalytics).filter(
                 UserAnalytics.user_id == user_id
             ).all()

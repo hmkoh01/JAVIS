@@ -1,9 +1,9 @@
 from typing import Dict, List, Type, Annotated, Sequence
 from agents.base_agent import BaseAgent
-from agents.chatbot_agent import ChatbotAgent
-from agents.coding_agent import CodingAgent
-from agents.dashboard_agent import DashboardAgent
-from agents.recommendation_agent import RecommendationAgent
+from agents.chatbot_agent.chatbot_agent import ChatbotAgent
+from agents.coding_agent.coding_agent import CodingAgent
+from agents.dashboard_agent.dashboard_agent import DashboardAgent
+from agents.recommendation_agent.recommendation_agent import RecommendationAgent
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
 
@@ -18,7 +18,7 @@ class AgentRegistry:
     def _register_default_agents(self):
         """기본 에이전트들을 등록합니다."""
         default_agents = [
-            ChatbotAgent(),
+            ChatbotAgent(),  # 멀티모달 RAG 챗봇 에이전트
             CodingAgent(),
             DashboardAgent(),
             RecommendationAgent()

@@ -14,9 +14,19 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_MODEL: str = "gpt-3.5-turbo"
     
+    # Gemini API 설정
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_MODEL: str = "gemini-1.5-flash"
+    
     # Ollama 설정
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama2"
+    
+    # Multimodal RAG 설정
+    IMAGE_UPLOAD_PATH: str = "./uploads/images"
+    IMAGE_PROCESSING_SIZE: tuple = (448, 448)
+    MAX_IMAGE_SIZE_MB: int = 10
+    SUPPORTED_IMAGE_FORMATS: list = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"]
     
     # RAG 설정
     CHUNK_SIZE: int = 1000

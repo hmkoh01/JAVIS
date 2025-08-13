@@ -1,244 +1,220 @@
-# JAVIS Multi-Agent System (LangGraph 기반)
+# JAVIS Multi-Agent System - Multimodal RAG Edition
 
-LangGraph를 사용하여 구현된 다중 에이전트 시스템으로, 사용자 맞춤 AI 비서를 제공합니다.
+🤖 **JAVIS (Just A Very Intelligent System)** - 멀티모달 RAG를 지원하는 다중 에이전트 시스템
 
-## 🚀 주요 특징
+## 🚀 주요 기능
 
-- **LangGraph 기반**: StateGraph를 사용한 워크플로우 기반 아키텍처
-- **다중 에이전트**: 4가지 전문 에이전트 (챗봇, 코딩, 대시보드, 추천)
-- **RAG 시스템**: Milvus + Neo4j를 활용한 고급 검색 및 지식 관리
-- **React Framework 도구**: 4가지 도구 (DB 검색, 인터넷 검색, 이메일, 외부 API)
-- **모듈화 설계**: 에이전트와 도구의 쉬운 추가/제거
+### 멀티모달 RAG 시스템
+- **이미지 업로드 및 처리**: 다양한 이미지 형식 지원 (PNG, JPG, JPEG, GIF, BMP, WEBP)
+- **메타데이터 추출**: Gemini API를 사용한 OCR, 시각적 설명, 객체 감지
+- **이미지 기반 검색**: 텍스트 쿼리로 관련 이미지 검색
+- **멀티모달 콘텐츠 생성**: 이미지와 텍스트를 결합한 콘텐츠 생성
+- **Gemini API 통합**: Google의 최신 멀티모달 AI 모델 활용
 
-## 🏗️ 아키텍처
+### 다중 에이전트 시스템
+- **멀티모달 챗봇 에이전트**: 이미지와 텍스트를 통합한 대화
+- **코딩 에이전트**: 프로그래밍 관련 작업 지원
+- **대시보드 에이전트**: 데이터 시각화 및 분석
+- **추천 에이전트**: 개인화된 추천 시스템
 
-### LangGraph 워크플로우
+### 기술 스택
+- **백엔드**: FastAPI, LangGraph, SQLAlchemy
+- **AI/ML**: Google Gemini API, Transformers, PyTorch
+- **데이터베이스**: SQLite (확장 가능)
+- **프론트엔드**: Streamlit
+- **이미지 처리**: Pillow, OpenCV
 
-```
-User Input → Intent Analyzer → Agent Selector → Agent Executor → Response
-```
+## 📋 설치 및 설정
 
-1. **Intent Analyzer**: 사용자 의도를 LLM으로 분석
-2. **Agent Selector**: 적절한 에이전트 선택
-3. **Agent Executor**: 선택된 에이전트 실행
+### 1. 시스템 요구사항
+- Python 3.8 이상
+- Gemini API 키 (Google AI Studio에서 발급)
 
-### 에이전트 구성
-
-- **Chatbot Agent**: RAG 기반 챗봇 + 4가지 도구
-- **Coding Agent**: 코드 생성 및 분석
-- **Dashboard Agent**: 데이터 시각화 및 분석
-- **Recommendation Agent**: 개인화된 추천
-
-## 📦 설치 및 실행
-
-### 1. 의존성 설치
-
+### 2. 저장소 클론
 ```bash
+git clone <repository-url>
+cd JAVIS_MAS
+```
+
+### 3. 초기 설정
+```bash
+# 시스템 초기 설정
+python setup.py
+
+# 의존성 설치
 pip install -r requirements.txt
 ```
 
-### 2. 환경 변수 설정
-
-`.env` 파일을 생성하고 다음 설정을 추가하세요:
+### 4. 환경 변수 설정
+`setup.py`가 자동으로 `.env` 파일을 생성합니다. 다음 설정을 확인/수정하세요:
 
 ```env
-# OpenAI 설정
-OPENAI_API_KEY=your_openai_api_key
-OPENAI_MODEL=gpt-3.5-turbo
+# Gemini API 설정 (필수)
+GEMINI_API_KEY=your_gemini_api_key_here
 
-# Ollama 설정 (선택사항)
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama2
+# 데이터베이스 설정
+DATABASE_URL=sqlite:///./javis.db
 
-# Milvus 설정
-MILVUS_HOST=localhost
-MILVUS_PORT=19530
-MILVUS_COLLECTION=javis_knowledge
+# API 설정
+API_HOST=0.0.0.0
+API_PORT=8000
 
-# Neo4j 설정
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=password
-
-# 이메일 설정 (선택사항)
-EMAIL_FROM=your_email@example.com
-SMTP_SERVER=smtp.gmail.com
-SMTP_PORT=587
-EMAIL_USERNAME=your_email@example.com
-EMAIL_PASSWORD=your_app_password
+# 이미지 업로드 설정
+IMAGE_UPLOAD_PATH=./uploads/images
+MAX_IMAGE_SIZE_MB=10
 ```
 
-### 3. 데이터베이스 설정
-
-#### Milvus 실행
+### 5. 시스템 시작
 ```bash
-# Docker로 Milvus 실행
-docker run -d --name milvus_standalone -p 19530:19530 -p 9091:9091 milvusdb/milvus:latest standalone
+# 전체 시스템 시작 (권장)
+python start.py
+
+# 또는 개별 시작
+# 백엔드만: cd backend && python main.py
+# 프론트엔드만: cd frontend && streamlit run front.py
 ```
 
-#### Neo4j 실행
+## 🏃‍♂️ 빠른 시작
+
+### 1. 시스템 실행
 ```bash
-# Docker로 Neo4j 실행
-docker run -d --name neo4j -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password neo4j:latest
+python start.py
 ```
+- 옵션 3을 선택하여 전체 시스템을 시작하세요
+- 웹 인터페이스: http://localhost:8501
+- API 문서: http://localhost:8000/docs
 
-### 4. 애플리케이션 실행
+### 2. 이미지 업로드
+1. 웹 인터페이스에서 "이미지 업로드" 페이지로 이동
+2. 이미지 파일 선택 및 업로드
+3. 자동으로 OCR, 시각적 설명, 객체 감지 수행
 
+### 3. 멀티모달 대화
+1. "대화" 페이지에서 질문 입력
+2. 시스템이 관련 이미지를 검색
+3. Gemini API를 사용하여 이미지와 텍스트를 결합한 답변 생성
+
+## 📚 API 사용법
+
+### 멀티모달 RAG API
+
+#### 1. 대화
 ```bash
-cd backend
-python main.py
+curl -X POST "http://localhost:8000/api/v2/multimodal/chat" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "message=이 이미지에서 무엇을 볼 수 있나요?"
 ```
 
-서버가 `http://localhost:8000`에서 실행됩니다.
-
-## 🔧 API 사용법
-
-### 1. 일반 요청 처리
-
+#### 2. 이미지 업로드
 ```bash
-curl -X POST "http://localhost:8000/api/v2/process" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": 1,
-    "message": "파이썬으로 피보나치 수열을 계산하는 함수를 만들어줘",
-    "context": {}
-  }'
+curl -X POST "http://localhost:8000/api/v2/multimodal/upload-image" \
+  -F "file=@your_image.jpg" \
+  -F "user_id=1"
 ```
 
-### 2. 특정 에이전트 사용
-
+#### 3. 이미지 검색
 ```bash
-curl -X POST "http://localhost:8000/api/v2/agent/coding" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": 1,
-    "message": "파이썬으로 피보나치 수열을 계산하는 함수를 만들어줘"
-  }'
+curl -X GET "http://localhost:8000/api/v2/multimodal/search-images?query=차트&top_k=5"
 ```
 
-### 3. RAG 지식 처리
-
+#### 4. 멀티모달 콘텐츠 생성
 ```bash
-curl -X POST "http://localhost:8000/api/v2/rag/process" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "content": "LangGraph는 LangChain에서 제공하는 그래프 기반 워크플로우 라이브러리입니다.",
-    "title": "LangGraph 소개",
-    "source": "documentation",
-    "document_type": "text",
-    "metadata": {"category": "framework", "tags": ["langgraph", "workflow"]}
-  }'
+curl -X POST "http://localhost:8000/api/v2/multimodal/create-content" \
+  -F "title=분석 보고서" \
+  -F "description=이미지 분석 결과" \
+  -F "text_content=분석 내용..." \
+  -F "image_id=1" \
+  -F "tags=분석,보고서" \
+  -F "category=분석"
 ```
 
-### 4. RAG 검색
+## 🎯 사용 예시
 
-```bash
-curl "http://localhost:8000/api/v2/rag/search?query=LangGraph란 무엇인가요&top_k=5&search_type=hybrid"
+### 1. 이미지 업로드 및 분석
+1. Streamlit 프론트엔드에서 "이미지 업로드" 페이지로 이동
+2. 이미지 파일 선택 및 업로드
+3. 자동으로 OCR, 시각적 설명, 객체 감지 수행
+4. 메타데이터가 데이터베이스에 저장
+
+### 2. 이미지 기반 대화
+1. "대화" 페이지에서 질문 입력
+2. 시스템이 관련 이미지를 검색
+3. Gemini API를 사용하여 이미지와 텍스트를 결합한 답변 생성
+
+### 3. 이미지 검색
+1. "이미지 검색" 페이지에서 키워드 입력
+2. 관련 이미지들을 검색하여 표시
+3. 각 이미지의 메타데이터 확인
+
+## 🏗️ 아키텍처
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Streamlit     │    │   FastAPI       │    │   SQLite DB     │
+│   Frontend      │◄──►│   Backend       │◄──►│   (Images +     │
+│                 │    │                 │    │    Metadata)    │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                              │
+                              ▼
+                       ┌─────────────────┐
+                       │   Gemini API    │
+                       │   (Multimodal)  │
+                       └─────────────────┘
 ```
 
-### 5. 시스템 상태 확인
-
-```bash
-curl "http://localhost:8000/api/v2/health"
-```
-
-## 🛠️ 도구 시스템
-
-### Chatbot Agent의 4가지 도구
-
-1. **Database Search Tool**: Milvus + Neo4j 기반 지식 검색
-2. **Internet Search Tool**: 실시간 웹 검색
-3. **Email Tool**: 이메일 전송 및 읽기
-4. **External API Tool**: 외부 API 호출
-
-### 도구 사용 예시
-
-```bash
-# 특정 도구 실행
-curl -X POST "http://localhost:8000/api/v2/agents/chatbot/tools/database_search" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": 1,
-    "message": "LangGraph에 대해 알려줘"
-  }'
-```
-
-## 📊 LangGraph vs 기존 구현
-
-| 구분 | 기존 구현 | LangGraph 기반 |
-|------|-----------|----------------|
-| **구조** | 객체지향 클래스 | 그래프 워크플로우 |
-| **상태 관리** | 개별 객체 | 중앙화된 상태 |
-| **에이전트 간 통신** | 직접 호출 | 메시지 기반 |
-| **병렬 처리** | 제한적 | 자연스러운 병렬 처리 |
-| **디버깅** | 일반적 | 시각적 그래프 디버깅 |
-| **확장성** | 중간 | 높음 |
-
-## 🔍 디버깅 및 모니터링
-
-### LangGraph 시각화
-
-LangGraph는 워크플로우를 시각적으로 디버깅할 수 있는 기능을 제공합니다:
-
-```python
-# 그래프 시각화
-from core.supervisor import supervisor
-supervisor.graph.get_graph().draw_mermaid()
-```
-
-### 로그 확인
-
-```bash
-# 애플리케이션 로그 확인
-tail -f logs/app.log
-```
-
-## 🚀 확장 가이드
+## 🔧 개발 가이드
 
 ### 새로운 에이전트 추가
+1. `backend/agents/` 디렉토리에 새 에이전트 클래스 생성
+2. `BaseAgent`를 상속받아 구현
+3. `agent_registry.py`에 등록
 
-1. `agents/` 폴더에 새 에이전트 클래스 생성
-2. `BaseAgent` 상속
-3. `AgentRegistry`에 등록
+### 이미지 처리 확장
+1. `ImageProcessor` 클래스에서 새로운 처리 로직 추가
+2. `MultimodalRAGEngine`에서 검색 알고리즘 개선
+3. 새로운 메타데이터 필드 추가
 
-```python
-from agents.base_agent import BaseAgent, AgentResponse
+## 📊 성능 최적화
 
-class NewAgent(BaseAgent):
-    def __init__(self):
-        super().__init__(
-            agent_type="new_agent",
-            description="새로운 에이전트 설명"
-        )
-    
-    async def process(self, user_input: str, user_id: Optional[int] = None) -> AgentResponse:
-        # 에이전트 로직 구현
-        pass
+### 이미지 처리
+- 이미지 크기 자동 조정 (448x448)
+- 배치 처리 지원
+- 메모리 효율적인 처리
+
+### 검색 성능
+- 키워드 기반 검색 (향후 임베딩 기반으로 확장 가능)
+- 캐싱 메커니즘
+- 인덱싱 최적화
+
+## 🐛 문제 해결
+
+### 일반적인 문제
+1. **Gemini API 오류**: API 키가 올바르게 설정되었는지 확인
+2. **이미지 업로드 실패**: 파일 크기와 형식 확인
+3. **데이터베이스 오류**: SQLite 파일 권한 확인
+4. **포트 충돌**: 8000번(백엔드) 또는 8501번(프론트엔드) 포트가 사용 중인지 확인
+
+### 로그 확인
+```bash
+# 백엔드 로그
+tail -f backend/logs/app.log
+
+# 프론트엔드 로그
+streamlit run front.py --logger.level debug
 ```
 
-### 새로운 도구 추가
+### 디버깅 모드
+```bash
+# 백엔드 디버깅
+cd backend
+python main.py --debug
 
-1. `agents/chatbot_agent/tools.py`에 새 도구 클래스 생성
-2. `BaseTool` 상속
-3. `ToolManager`에 등록
-
-```python
-from .tools import BaseTool, ToolResult
-
-class NewTool(BaseTool):
-    def __init__(self):
-        super().__init__("new_tool", "새로운 도구 설명")
-    
-    async def execute(self, **kwargs) -> ToolResult:
-        # 도구 로직 구현
-        pass
+# 프론트엔드 디버깅
+cd frontend
+streamlit run front.py --debug
 ```
 
-## 📝 라이선스
-
-MIT License
-
-## 🤝 기여
+## 🤝 기여하기
 
 1. Fork the repository
 2. Create a feature branch
@@ -246,6 +222,17 @@ MIT License
 4. Push to the branch
 5. Create a Pull Request
 
-## 📞 지원
+## 📄 라이선스
 
-문제가 있거나 질문이 있으시면 이슈를 생성해주세요. 
+이 프로젝트는 MIT 라이선스 하에 배포됩니다.
+
+## 🙏 감사의 말
+
+- Google Gemini API 팀
+- LangGraph 개발팀
+- FastAPI 커뮤니티
+- Streamlit 팀
+
+---
+
+**JAVIS Multi-Agent System** - 멀티모달 AI의 미래를 만들어갑니다! 🚀 

@@ -2,7 +2,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.ext.declarative import declarative_base
 from config.settings import settings
-from .models import Base
 
 # 데이터베이스 엔진 생성
 engine = create_engine(
@@ -13,14 +12,22 @@ engine = create_engine(
 # 세션 팩토리 생성
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-def get_db() -> Session:
+# Base 클래스
+Base = declarative_base()
+
+def get_db_session() -> Session:
     """데이터베이스 세션을 반환합니다."""
     db = SessionLocal()
     try:
-        yield db
-    finally:
+        return db
+    except Exception as e:
         db.close()
+        raise e
 
-def init_db():
+def create_tables():
     """데이터베이스 테이블을 생성합니다."""
-    Base.metadata.create_all(bind=engine) 
+    Base.metadata.create_all(bind=engine)
+
+def drop_tables():
+    """데이터베이스 테이블을 삭제합니다."""
+    Base.metadata.drop_all(bind=engine) 

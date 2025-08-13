@@ -71,6 +71,9 @@ async def get_agent_tools(agent_type: str):
         if hasattr(agent, 'get_available_tools'):
             tools = agent.get_available_tools()
             return {"agent_type": agent_type, "tools": tools}
+        elif hasattr(agent, 'get_available_operations'):
+            operations = agent.get_available_operations()
+            return {"agent_type": agent_type, "operations": operations}
         else:
             return {"agent_type": agent_type, "tools": []}
             
@@ -266,4 +269,8 @@ async def search_knowledge(query: str, top_k: int = 5, search_type: str = "hybri
         raise HTTPException(status_code=500, detail=f"검색 중 오류가 발생했습니다: {str(e)}")
 
 # RAG 라우터를 메인 라우터에 포함
-router.include_router(rag_router) 
+router.include_router(rag_router)
+
+# 멀티모달 라우터 추가
+from .multimodal_routes import router as multimodal_router
+router.include_router(multimodal_router) 
