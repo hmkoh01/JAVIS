@@ -4,45 +4,36 @@ from datetime import datetime, timedelta
 from ..base_agent import BaseAgent, AgentResponse
 from database.models import User, UserInteraction, KnowledgeBase
 from database.connection import get_db_session
-from tools.react_tools.web_search_tool import WebSearchTool
 
 class RecommendationAgent(BaseAgent):
-    """추천 에이전트"""
+    """추천 및 제안 관련 작업을 처리하는 에이전트"""
     
     def __init__(self):
         super().__init__(
             agent_type="recommendation",
-            description="사용자 정보를 기반으로 적합한 지식을 추천하는 에이전트"
+            description="추천, 제안, 추천해줘 등의 요청을 처리합니다."
         )
-        self.web_search_tool = WebSearchTool()
-        self.add_tool(self.web_search_tool)
     
     async def process(self, user_input: str, user_id: Optional[int] = None) -> AgentResponse:
         """사용자 입력을 처리합니다."""
         try:
-            if not user_id:
-                return AgentResponse(
-                    success=False,
-                    content="사용자 ID가 필요합니다.",
-                    agent_type=self.agent_type
-                )
+            # 간단한 추천 관련 응답
+            response_content = f"추천 에이전트가 '{user_input}' 요청을 처리했습니다. 현재는 기본 응답만 제공합니다."
             
-            # 추천 타입 분석
-            recommendation_type = self._analyze_recommendation_type(user_input)
-            
-            if recommendation_type == "knowledge":
-                return await self._recommend_knowledge(user_id, user_input)
-            elif recommendation_type == "content":
-                return await self._recommend_content(user_id, user_input)
-            elif recommendation_type == "learning_path":
-                return await self._recommend_learning_path(user_id, user_input)
-            else:
-                return await self._recommend_knowledge(user_id, user_input)
-                
+            return AgentResponse(
+                success=True,
+                content=response_content,
+                agent_type=self.agent_type,
+                metadata={
+                    "query": user_input,
+                    "user_id": user_id,
+                    "agent_type": "recommendation"
+                }
+            )
         except Exception as e:
             return AgentResponse(
                 success=False,
-                content=f"추천 생성 중 오류가 발생했습니다: {str(e)}",
+                content=f"추천 에이전트 처리 중 오류가 발생했습니다: {str(e)}",
                 agent_type=self.agent_type
             )
     

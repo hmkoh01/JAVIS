@@ -17,11 +17,9 @@ def check_dependencies():
     required_packages = [
         ('fastapi', 'fastapi'),
         ('uvicorn', 'uvicorn'),
-        ('streamlit', 'streamlit'),
-        ('google-generativeai', 'google.generativeai'),
-        ('pillow', 'PIL'),
         ('sqlalchemy', 'sqlalchemy'),
-        ('pydantic', 'pydantic')
+        ('pydantic', 'pydantic'),
+        ('langgraph', 'langgraph')
     ]
     
     missing_packages = []
@@ -110,7 +108,7 @@ def initialize_database():
                 sys.path.insert(0, str(backend_abs_path))
             
             try:
-                from database.connection import create_tables
+                from backend.database.connection import create_tables
                 create_tables()
                 print("✅ 데이터베이스가 초기화되었습니다.")
                 return True
@@ -143,7 +141,7 @@ def start_backend():
         
         # 백엔드 서버 시작 (간단한 버전 사용)
         process = subprocess.Popen([
-            sys.executable, 'main_simple.py'
+            sys.executable, 'main.py'
         ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
         # 원래 디렉토리로 복원
@@ -204,7 +202,7 @@ def start_frontend():
 
 def main():
     """메인 함수"""
-    print("🤖 JAVIS Multi-Agent System - 멀티모달 RAG Edition")
+    print("🤖 JAVIS Multi-Agent System")
     print("=" * 60)
     
     # 현재 디렉토리를 프로젝트 루트로 설정

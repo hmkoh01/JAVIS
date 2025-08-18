@@ -1,14 +1,19 @@
-from typing import Dict, Any, Optional, List, Annotated, Sequence, TypedDict
+from typing import Dict, Any, Optional, List, Annotated, Sequence, TypedDict, TYPE_CHECKING
 from pydantic import BaseModel
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
-from langchain_ollama import ChatOllama
-from langchain_core.messages import BaseMessage
-from langgraph.graph import StateGraph, END
+from langchain_community.chat_models import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from langgraph.graph import StateGraph
+from langgraph.constants import START, END
 from langgraph.graph.message import add_messages
+import google.generativeai as genai
 from config.settings import settings
 from core.agent_registry import agent_registry
 from agents.base_agent import AgentResponse
+
+if TYPE_CHECKING:
+    from agents.base_agent import BaseAgent
+else:
+    BaseAgent = None
 
 class UserIntent(BaseModel):
     """사용자 의도를 나타내는 모델"""
@@ -30,11 +35,12 @@ class AgentState(TypedDict):
     user_input: str
     user_id: Optional[int]
     user_context: Dict[str, Any]
-    selected_agent: str
+    selected_agents: List[str]  # 여러 에이전트 지원
     reasoning: str
-    agent_response: str
+    agent_responses: List[Dict[str, Any]]  # 여러 에이전트 응답
+    final_response: str  # 통합된 최종 응답
     agent_success: bool
-    agent_type: str
+    agent_type: str  # 주요 에이전트 타입
     agent_metadata: Dict[str, Any]
     available_agents: List[str]
 
@@ -49,17 +55,10 @@ class LangGraphSupervisor:
     def _initialize_llm(self):
         """LLM을 초기화합니다."""
         try:
-            if settings.OPENAI_API_KEY:
-                return ChatOpenAI(
-                    openai_api_key=settings.OPENAI_API_KEY,
-                    model_name="gpt-3.5-turbo",
-                    temperature=0.1
-                )
-            else:
-                return ChatOllama(
-                    base_url=settings.OLLAMA_BASE_URL,
-                    model=settings.OLLAMA_MODEL
-                )
+            # Gemini API 우선 사용
+            if settings.GEMINI_API_KEY:
+                genai.configure(api_key=settings.GEMINI_API_KEY)
+                return genai.GenerativeModel(settings.GEMINI_MODEL)
         except Exception as e:
             print(f"LLM 초기화 오류: {e}")
             return None
@@ -74,6 +73,7 @@ class LangGraphSupervisor:
         workflow.add_node("agent_executor", self._agent_executor_node)
         
         # 엣지 연결
+        workflow.add_edge(START, "intent_analyzer")
         workflow.add_edge("intent_analyzer", "agent_selector")
         workflow.add_edge("agent_selector", "agent_executor")
         workflow.add_edge("agent_executor", END)
@@ -106,91 +106,252 @@ class LangGraphSupervisor:
         try:
             user_input = state["user_input"]
             
-            if self.llm:
-                # LLM을 사용한 의도 분석
-                prompt = self._create_intent_analysis_prompt(user_input)
-                messages = [
-                    SystemMessage(content=prompt),
-                    HumanMessage(content=user_input)
-                ]
-                
-                response = await self.llm.agenerate([messages])
-                reasoning = response.generations[0][0].text
-            else:
-                # 규칙 기반 의도 분석 (fallback)
-                reasoning = "LLM을 사용할 수 없어 규칙 기반 분석을 수행합니다."
+            # LLM을 사용한 의도 분석 (여러 에이전트 지원)
+            intent_analysis = await self._analyze_intent_with_llm(user_input)
             
             new_state = state.copy()
-            new_state["reasoning"] = reasoning
+            new_state["reasoning"] = intent_analysis["reasoning"]
+            new_state["selected_agents"] = intent_analysis["selected_agents"]
+            new_state["intent_analysis"] = intent_analysis
+            
             return new_state
+        except Exception as e:
+            print(f"의도 분석 오류: {e}")
+            # 오류 발생 시 기본값 설정
+            new_state = state.copy()
+            new_state["reasoning"] = "의도 분석 중 오류가 발생했습니다."
+            new_state["selected_agents"] = ["chatbot"]
+            return new_state
+
+    async def _analyze_intent_with_llm(self, user_input: str) -> Dict[str, Any]:
+        """LLM을 사용하여 사용자 의도를 분석합니다 (여러 에이전트 지원)."""
+        try:
+            # LLM 프롬프트 생성
+            prompt = self._create_llm_intent_prompt(user_input)
+            
+            if hasattr(self.llm, 'generate_content'):
+                # Gemini API 사용
+                response = self.llm.generate_content(prompt)
+                analysis_text = response.text
+            else:
+                # LangChain 모델 사용
+                from langchain_core.messages import HumanMessage
+                messages = [HumanMessage(content=prompt)]
+                response = await self.llm.ainvoke(messages)
+                analysis_text = response.content
+            
+            # LLM 응답 파싱
+            parsed_analysis = self._parse_llm_response(analysis_text)
+            
+            return parsed_analysis
             
         except Exception as e:
-            new_state = state.copy()
-            new_state["reasoning"] = f"의도 분석 중 오류: {str(e)}"
-            return new_state
-    
+            print(f"LLM 의도 분석 오류: {e}")
+            return {}
+
+    def _create_llm_intent_prompt(self, user_input: str) -> str:
+        """LLM 의도 분석을 위한 프롬프트를 생성합니다."""
+        agent_descriptions = "\n".join([
+            f"- {agent_type}: {description}"
+            for agent_type, description in self.agent_descriptions.items()
+        ])
+        
+        return f"""
+당신은 사용자의 의도를 분석하여 적절한 AI 에이전트를 선택하는 전문가입니다.
+
+사용 가능한 에이전트들:
+{agent_descriptions}
+
+사용자의 메시지를 분석하여 어떤 에이전트가 가장 적합한지 판단하고, 그 이유를 설명해주세요.
+복잡한 요청의 경우 여러 에이전트를 조합하여 사용할 수 있습니다.
+
+분석 결과는 다음과 같은 JSON 형식으로 제공해주세요:
+{{
+    "selected_agents": ["에이전트1", "에이전트2"],
+    "primary_agent": "주요 에이전트명",
+    "confidence": 0.95,
+    "reasoning": "선택 이유와 에이전트 조합 이유 설명",
+    "keywords": ["키워드1", "키워드2"],
+    "intent": "사용자 의도 요약",
+    "agent_workflow": "에이전트 실행 순서와 역할 설명"
+}}
+
+에이전트 선택 기준:
+- coding: 코드 작성, 디버깅, 프로그래밍 관련 질문
+- dashboard: 데이터 시각화, 차트, 분석, 통계 관련 질문
+- recommendation: 추천, 제안, 추천해줘 등의 요청
+- chatbot: 일반적인 질문, 이미지 분석, 멀티모달 질문
+
+복합 요청 예시:
+- "코드를 작성하고 대시보드로 시각화해줘" → ["coding", "dashboard"]
+- "추천해주고 분석 결과를 차트로 보여줘" → ["recommendation", "dashboard"]
+- "이미지를 분석하고 코드로 구현해줘" → ["chatbot", "coding"]
+
+사용자 메시지: {user_input}
+
+JSON 응답만 제공해주세요:
+"""
+
+    def _parse_llm_response(self, response_text: str) -> Dict[str, Any]:
+        """LLM 응답을 파싱합니다."""
+        try:
+            import json
+            import re
+            
+            # JSON 부분 추출
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group()
+                parsed = json.loads(json_str)
+                
+                # 필수 필드 검증 및 기본값 설정
+                if "selected_agents" not in parsed:
+                    parsed["selected_agents"] = ["chatbot"]
+                if "primary_agent" not in parsed:
+                    parsed["primary_agent"] = parsed["selected_agents"][0] if parsed["selected_agents"] else "chatbot"
+                if "reasoning" not in parsed:
+                    parsed["reasoning"] = "LLM 분석 결과"
+                if "confidence" not in parsed:
+                    parsed["confidence"] = 0.8
+                if "keywords" not in parsed:
+                    parsed["keywords"] = []
+                if "intent" not in parsed:
+                    parsed["intent"] = "사용자 의도 분석"
+                if "agent_workflow" not in parsed:
+                    parsed["agent_workflow"] = "에이전트 실행 순서: " + " → ".join(parsed["selected_agents"])
+                
+                return parsed
+            else:
+                # JSON이 없으면 키워드 기반 폴백
+                return 
+                
+        except Exception as e:
+            print(f"LLM 응답 파싱 오류: {e}")
+            return {}
+
     async def _agent_selector_node(self, state: AgentState) -> AgentState:
         """적절한 에이전트를 선택하는 노드"""
         try:
             user_input = state["user_input"]
             reasoning = state["reasoning"]
-            
-            # 에이전트 선택 로직
-            selected_agent = self._select_agent(user_input, reasoning)
+            selected_agents = state.get("selected_agents", ["chatbot"])
             
             new_state = state.copy()
-            new_state["selected_agent"] = selected_agent
+            new_state["selected_agents"] = selected_agents
             new_state["available_agents"] = list(self.agent_descriptions.keys())
             return new_state
             
         except Exception as e:
             new_state = state.copy()
-            new_state["selected_agent"] = "chatbot"  # 기본값
+            new_state["selected_agents"] = ["chatbot"]  # 기본값
             new_state["reasoning"] += f" 에이전트 선택 중 오류: {str(e)}"
             return new_state
     
     async def _agent_executor_node(self, state: AgentState) -> AgentState:
-        """선택된 에이전트를 실행하는 노드"""
+        """선택된 여러 에이전트를 순차적으로 실행하는 노드"""
         try:
-            selected_agent = state["selected_agent"]
+            selected_agents = state["selected_agents"]
             user_input = state["user_input"]
             user_id = state["user_id"]
             
-            # 에이전트 노드 가져오기
-            agent_node = agent_registry.get_agent_node(selected_agent)
+            agent_responses = []
+            final_response = ""
+            agent_success = True
+            primary_agent_type = "unknown"
             
-            if agent_node:
-                # 에이전트 실행
-                result_state = await agent_node(state)
-                return result_state
-            else:
-                # 에이전트를 찾을 수 없는 경우
-                new_state = state.copy()
-                new_state["agent_response"] = f"에이전트를 찾을 수 없습니다: {selected_agent}"
-                new_state["agent_success"] = False
-                new_state["agent_type"] = selected_agent
-                return new_state
+            # 각 에이전트를 순차적으로 실행
+            for i, agent_type in enumerate(selected_agents):
+                try:
+                    # 에이전트 노드 가져오기
+                    agent_node = agent_registry.get_agent_node(agent_type)
+                    
+                    if agent_node:
+                        # 현재 에이전트용 상태 생성
+                        agent_state = {
+                            "messages": state.get("messages", []),
+                            "user_input": user_input,
+                            "user_id": user_id,
+                            "user_context": state.get("user_context", {}),
+                            "selected_agent": agent_type,  # 단일 에이전트용
+                            "reasoning": state.get("reasoning", ""),
+                            "agent_response": "",
+                            "agent_success": False,
+                            "agent_type": agent_type,
+                            "agent_metadata": {},
+                            "available_agents": state.get("available_agents", [])
+                        }
+                        
+                        # 에이전트 실행
+                        result_state = await agent_node(agent_state)
+                        
+                        # 응답 수집
+                        agent_response = {
+                            "agent_type": agent_type,
+                            "content": result_state.get("agent_response", ""),
+                            "success": result_state.get("agent_success", False),
+                            "metadata": result_state.get("agent_metadata", {}),
+                            "order": i + 1
+                        }
+                        
+                        agent_responses.append(agent_response)
+                        
+                        # 첫 번째 에이전트를 주요 에이전트로 설정
+                        if i == 0:
+                            primary_agent_type = agent_type
+                            final_response = result_state.get("agent_response", "")
+                        
+                        # 에이전트 실행 실패 시 전체 실패로 처리
+                        if not result_state.get("agent_success", False):
+                            agent_success = False
+                            
+                    else:
+                        # 에이전트를 찾을 수 없는 경우
+                        agent_responses.append({
+                            "agent_type": agent_type,
+                            "content": f"에이전트를 찾을 수 없습니다: {agent_type}",
+                            "success": False,
+                            "metadata": {},
+                            "order": i + 1
+                        })
+                        agent_success = False
+                        
+                except Exception as e:
+                    # 개별 에이전트 실행 오류
+                    agent_responses.append({
+                        "agent_type": agent_type,
+                        "content": f"에이전트 실행 중 오류: {str(e)}",
+                        "success": False,
+                        "metadata": {"error": str(e)},
+                        "order": i + 1
+                    })
+                    agent_success = False
+            
+            # 여러 에이전트 응답을 통합
+            if len(agent_responses) > 1:
+                final_response = self._combine_agent_responses(agent_responses, user_input)
+            
+            new_state = state.copy()
+            new_state["agent_responses"] = agent_responses
+            new_state["final_response"] = final_response
+            new_state["agent_success"] = agent_success
+            new_state["agent_type"] = primary_agent_type
+            new_state["agent_metadata"] = {
+                "total_agents": len(selected_agents),
+                "executed_agents": [resp["agent_type"] for resp in agent_responses],
+                "successful_agents": [resp["agent_type"] for resp in agent_responses if resp["success"]],
+                "failed_agents": [resp["agent_type"] for resp in agent_responses if not resp["success"]]
+            }
+            
+            return new_state
                 
         except Exception as e:
             new_state = state.copy()
-            new_state["agent_response"] = f"에이전트 실행 중 오류: {str(e)}"
+            new_state["agent_responses"] = []
+            new_state["final_response"] = f"에이전트 실행 중 오류: {str(e)}"
             new_state["agent_success"] = False
-            new_state["agent_type"] = state.get("selected_agent", "unknown")
+            new_state["agent_type"] = "unknown"
+            new_state["agent_metadata"] = {"error": str(e)}
             return new_state
-    
-    def _select_agent(self, user_input: str, reasoning: str) -> str:
-        """사용자 입력과 분석 결과를 기반으로 적절한 에이전트를 선택합니다."""
-        input_lower = user_input.lower()
-        
-        # 키워드 기반 에이전트 선택
-        if any(keyword in input_lower for keyword in ["코드", "프로그램", "개발", "함수", "클래스", "버그", "디버그"]):
-            return "coding"
-        elif any(keyword in input_lower for keyword in ["대시보드", "차트", "그래프", "분석", "통계", "시각화"]):
-            return "dashboard"
-        elif any(keyword in input_lower for keyword in ["추천", "추천해", "추천해줘", "추천해주세요"]):
-            return "recommendation"
-        else:
-            return "chatbot"  # 기본값
     
     def _create_intent_analysis_prompt(self, user_message: str) -> str:
         """의도 분석을 위한 프롬프트를 생성합니다."""
@@ -225,9 +386,10 @@ class LangGraphSupervisor:
                 "user_input": user_intent.message,
                 "user_id": user_intent.user_id,
                 "user_context": user_intent.context,
-                "selected_agent": "",
+                "selected_agents": [],
                 "reasoning": "",
-                "agent_response": "",
+                "agent_responses": [],
+                "final_response": "",
                 "agent_success": False,
                 "agent_type": "",
                 "agent_metadata": {},
@@ -240,10 +402,10 @@ class LangGraphSupervisor:
             # 결과를 SupervisorResponse로 변환
             return SupervisorResponse(
                 success=result["agent_success"],
-                selected_agent=result["selected_agent"],
+                selected_agent=result.get("selected_agents", [result["agent_type"]])[0],  # 첫 번째 에이전트
                 response=AgentResponse(
                     success=result["agent_success"],
-                    content=result["agent_response"],
+                    content=result["final_response"],
                     agent_type=result["agent_type"],
                     metadata=result["agent_metadata"]
                 ),
@@ -251,7 +413,9 @@ class LangGraphSupervisor:
                 metadata={
                     "available_agents": result["available_agents"],
                     "user_context": user_intent.context,
-                    "graph_execution": True
+                    "graph_execution": True,
+                    "selected_agents": result.get("selected_agents", []),
+                    "agent_responses": result.get("agent_responses", [])
                 }
             )
             
@@ -281,6 +445,51 @@ class LangGraphSupervisor:
         """에이전트를 제거합니다."""
         agent_registry.unregister_agent(agent_type)
         self.agent_descriptions = agent_registry.get_agent_descriptions()
+
+    def _combine_agent_responses(self, agent_responses: List[Dict[str, Any]], user_input: str) -> str:
+        """여러 에이전트의 응답을 지능적으로 통합합니다."""
+        try:
+            if not agent_responses:
+                return "에이전트 응답이 없습니다."
+            
+            if len(agent_responses) == 1:
+                return agent_responses[0]["content"]
+            
+            # 성공한 에이전트 응답만 필터링
+            successful_responses = [resp for resp in agent_responses if resp["success"]]
+            
+            if not successful_responses:
+                return "모든 에이전트 실행에 실패했습니다."
+            
+            # 에이전트 타입별로 응답 분류
+            response_by_type = {}
+            for resp in successful_responses:
+                agent_type = resp["agent_type"]
+                if agent_type not in response_by_type:
+                    response_by_type[agent_type] = []
+                response_by_type[agent_type].append(resp["content"])
+            
+            # 통합된 응답 생성
+            combined_response = "여러 에이전트의 결과를 통합했습니다:\n\n"
+            
+            for agent_type, responses in response_by_type.items():
+                combined_response += f"**{agent_type.upper()} 에이전트 결과:**\n"
+                for i, response in enumerate(responses, 1):
+                    combined_response += f"{i}. {response}\n"
+                combined_response += "\n"
+            
+            # 요약 추가
+            combined_response += f"총 {len(successful_responses)}개의 에이전트가 성공적으로 실행되었습니다."
+            
+            return combined_response
+            
+        except Exception as e:
+            print(f"에이전트 응답 통합 오류: {e}")
+            # 오류 발생 시 첫 번째 성공한 응답 반환
+            for resp in agent_responses:
+                if resp["success"]:
+                    return resp["content"]
+            return "에이전트 응답 통합 중 오류가 발생했습니다."
 
 # 전역 Supervisor 인스턴스 (LangGraph 기반)
 supervisor = LangGraphSupervisor() 

@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     MILVUS_HOST: str = "localhost"
     MILVUS_PORT: int = 19530
     MILVUS_COLLECTION: str = "knowledge_base"
+    MILVUS_DIMENSION: int = 1536  # OpenAI embedding dimension
+    
+    # Tavily 설정
+    TAVILY_API_KEY: Optional[str] = None
+    
+    # ColQwen2 설정
+    COLQWEN2_BASE_URL: str = "http://localhost:11434"
+    COLQWEN2_MODEL: str = "qwen2.5-72b-instruct"
     
     # Neo4j 설정
     NEO4J_URI: str = "bolt://localhost:7687"

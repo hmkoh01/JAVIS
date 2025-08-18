@@ -1,11 +1,15 @@
-from typing import Dict, List, Type, Annotated, Sequence
-from agents.base_agent import BaseAgent
+from typing import Dict, List, Type, Annotated, Sequence, TYPE_CHECKING
 from agents.chatbot_agent.chatbot_agent import ChatbotAgent
 from agents.coding_agent.coding_agent import CodingAgent
 from agents.dashboard_agent.dashboard_agent import DashboardAgent
 from agents.recommendation_agent.recommendation_agent import RecommendationAgent
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
+
+if TYPE_CHECKING:
+    from agents.base_agent import BaseAgent
+else:
+    BaseAgent = None
 
 class AgentRegistry:
     """에이전트들을 등록하고 관리하는 레지스트리 (LangGraph 호환)"""

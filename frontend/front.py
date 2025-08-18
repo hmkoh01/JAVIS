@@ -90,6 +90,9 @@ class FloatingChatApp:
         self.button_canvas.bind('<B1-Motion>', self.on_drag)
         self.button_canvas.bind('<ButtonRelease-1>', self.stop_drag)
         
+        # 우클릭 메뉴 이벤트 바인딩
+        self.button_canvas.bind('<Button-3>', self.show_context_menu)
+        
         # 호버 효과
         self.button_canvas.bind('<Enter>', self.on_hover)
         self.button_canvas.bind('<Leave>', self.on_leave)
@@ -152,6 +155,38 @@ class FloatingChatApp:
             self.toggle_chat_window()
         self.drag_data["dragging"] = False
         
+    def show_context_menu(self, event):
+        """우클릭 컨텍스트 메뉴 표시"""
+        # 팝업 메뉴 생성
+        context_menu = tk.Menu(self.root, tearoff=0)
+        context_menu.add_command(label="옵션 설정", command=self.show_options)
+        context_menu.add_separator()
+        context_menu.add_command(label="시스템 종료", command=self.quit_system)
+        
+        # 메뉴를 마우스 위치에 표시
+        try:
+            context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            context_menu.grab_release()
+            
+    def show_options(self):
+        """옵션 설정 창 표시 (현재는 선택지만 표시)"""
+        # 간단한 알림 창으로 옵션 설정 기능이 있다는 것을 표시
+        import tkinter.messagebox as messagebox
+        messagebox.showinfo("옵션 설정", "옵션 설정 기능은 현재 개발 중입니다.")
+        
+    def quit_system(self):
+        """시스템 종료"""
+        # 종료 확인
+        import tkinter.messagebox as messagebox
+        result = messagebox.askyesno("시스템 종료", "정말로 JAVIS를 종료하시겠습니까?")
+        if result:
+            # 프로그램 완전 종료
+            self.root.quit()
+            self.root.destroy()
+            import sys
+            sys.exit(0)
+        
     def create_chat_window(self):
         """채팅창 생성"""
         # 채팅창 윈도우
@@ -195,21 +230,6 @@ class FloatingChatApp:
             fg='#e0e7ff'
         )
         subtitle_label.pack(side='left', padx=20, pady=(0, 20))
-        
-        # 닫기 버튼
-        close_button = tk.Button(
-            header_frame,
-            text="×",
-            font=('Arial', 20),
-            bg='#4f46e5',
-            fg='white',
-            relief='flat',
-            cursor='hand2',
-            command=self.close_chat_window,
-            width=3,
-            height=1
-        )
-        close_button.pack(side='right', padx=20, pady=20)
         
         # 메시지 영역
         self.messages_frame = tk.Frame(self.chat_window, bg='white')
@@ -276,9 +296,9 @@ class FloatingChatApp:
         if self.chat_window.state() == 'withdrawn':
             # 버튼 숨기기
             self.root.withdraw()
-            # 채팅창을 버튼 위치에 표시
-            button_x = self.root.winfo_x()
-            button_y = self.root.winfo_y()
+            # 채팅창을 버튼 위치에 표시 
+            button_x = self.root.winfo_x() - 450
+            button_y = self.root.winfo_y() - 550
             self.chat_window.geometry(f'500x600+{button_x}+{button_y}')
             self.chat_window.deiconify()
             self.message_input.focus()
@@ -370,16 +390,20 @@ class FloatingChatApp:
     def get_bot_response(self, message):
         """봇 응답 가져오기"""
         try:
-            # API 호출
+            # API 호출 - Supervisor 기반 처리
             response = requests.post(
-                f"{self.API_BASE_URL}/api/v2/multimodal/chat",
-                data={"message": message},
+                f"{self.API_BASE_URL}/api/v2/process",
+                json={"message": message, "user_id": 1},
                 timeout=30
             )
             
             if response.status_code == 200:
                 result = response.json()
-                bot_response = result.get("message", "Sorry, I couldn't process your request.")
+                # Supervisor 응답 구조에 맞게 처리
+                if result.get("success"):
+                    bot_response = result.get("content", "응답을 처리할 수 없습니다.")
+                else:
+                    bot_response = result.get("content", "처리 중 오류가 발생했습니다.")
             else:
                 bot_response = f"Error: {response.status_code} - {response.text}"
                 

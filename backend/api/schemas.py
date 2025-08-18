@@ -1,66 +1,101 @@
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
+from datetime import datetime
 
-class ChatRequest(BaseModel):
-    """채팅 요청 스키마"""
+class UserIntent(BaseModel):
+    """사용자 의도 모델"""
     user_id: Optional[int] = None
     message: str
     context: Dict[str, Any] = {}
 
+class ChatRequest(BaseModel):
+    """채팅 요청 모델"""
+    message: str
+    user_id: Optional[int] = None
+
 class ChatResponse(BaseModel):
-    """채팅 응답 스키마"""
+    """채팅 응답 모델"""
     success: bool
     message: str
-    selected_agent: str
-    reasoning: str
-    metadata: Dict[str, Any] = {}
-
-class AgentInfo(BaseModel):
-    """에이전트 정보 스키마"""
     agent_type: str
-    description: str
-
-class ToolInfo(BaseModel):
-    """도구 정보 스키마"""
-    name: str
-    description: str
-    parameters: Dict[str, Any]
-
-class SystemStatus(BaseModel):
-    """시스템 상태 스키마"""
-    status: str
-    available_agents: List[AgentInfo]
-    available_tools: List[ToolInfo]
     metadata: Dict[str, Any] = {}
 
-class UserCreateRequest(BaseModel):
-    """사용자 생성 요청 스키마"""
-    username: str
-    email: str
-    preferences: Dict[str, Any] = {}
-
-class UserResponse(BaseModel):
-    """사용자 응답 스키마"""
-    id: int
-    username: str
-    email: str
-    preferences: Dict[str, Any]
-    created_at: str
-    updated_at: str
-
-class KnowledgeBaseRequest(BaseModel):
-    """지식베이스 요청 스키마"""
-    title: str
+class SupervisorResponse(BaseModel):
+    """Supervisor 응답 모델"""
+    success: bool
     content: str
-    category: str
-    tags: List[str] = []
+    agent_type: str
+    metadata: Dict[str, Any] = {}
+    timestamp: Optional[datetime] = None
 
-class KnowledgeBaseResponse(BaseModel):
-    """지식베이스 응답 스키마"""
-    id: int
-    title: str
+class AgentResponse(BaseModel):
+    """에이전트 응답 모델"""
+    success: bool
     content: str
-    category: str
-    tags: List[str]
-    created_at: str
-    updated_at: str 
+    agent_type: str
+    metadata: Dict[str, Any] = {}
+
+class DataCollectionStatus(BaseModel):
+    """데이터 수집 상태 모델"""
+    active_users: List[int]
+    total_managers: int
+    managers_info: Dict[str, Any]
+    timestamp: datetime
+
+class DataCollectionStats(BaseModel):
+    """데이터 수집 통계 모델"""
+    total_records: Dict[str, int]
+    last_24_hours: Dict[str, int]
+    active_collectors: int
+    timestamp: datetime
+
+class FileInfo(BaseModel):
+    """파일 정보 모델"""
+    file_path: str
+    file_name: str
+    file_size: int
+    file_type: str
+    file_category: str
+    created_date: Optional[datetime] = None
+    modified_date: Optional[datetime] = None
+    accessed_date: Optional[datetime] = None
+
+class BrowserHistoryInfo(BaseModel):
+    """브라우저 히스토리 정보 모델"""
+    browser_name: str
+    browser_version: str
+    url: str
+    title: str
+    visit_count: int
+    visit_time: datetime
+    last_visit_time: datetime
+    page_transition: str
+    visit_duration: Optional[int] = None
+
+class ActiveAppInfo(BaseModel):
+    """활성 애플리케이션 정보 모델"""
+    app_name: str
+    app_path: str
+    app_version: str
+    app_category: str
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    duration: int
+    window_title: Optional[str] = None
+    window_state: Optional[str] = None
+    cpu_usage: float
+    memory_usage: float
+
+class ScreenActivityInfo(BaseModel):
+    """화면 활동 정보 모델"""
+    screenshot_path: str
+    activity_description: str
+    activity_category: str
+    activity_confidence: float
+    detected_apps: List[str]
+    detected_text: List[str]
+    detected_objects: List[str]
+    screen_resolution: str
+    color_mode: str
+    captured_at: datetime
+    analyzed_at: Optional[datetime] = None 

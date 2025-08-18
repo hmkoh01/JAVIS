@@ -1,276 +1,228 @@
-from fastapi import APIRouter, HTTPException, Depends
-from typing import Dict, Any, Optional
-from pydantic import BaseModel
-from core.supervisor import supervisor, UserIntent, SupervisorResponse
+from fastapi import APIRouter, HTTPException, Depends, Form
+from fastapi.responses import JSONResponse
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+import asyncio
+
+from .schemas import UserIntent, SupervisorResponse, ChatRequest, ChatResponse
+from core.supervisor import supervisor
 from core.agent_registry import agent_registry
-from agents.base_agent import AgentResponse
+from database.data_collector import (
+    start_user_data_collection, 
+    stop_user_data_collection, 
+    stop_all_data_collection,
+    data_collection_managers
+)
 
 router = APIRouter()
 
-class UserRequest(BaseModel):
-    """사용자 요청 모델"""
-    user_id: Optional[int] = None
-    message: str
-    context: Dict[str, Any] = {}
-
-class AgentRequest(BaseModel):
-    """특정 에이전트 요청 모델"""
-    user_id: Optional[int] = None
-    message: str
-    agent_type: str
-
-@router.post("/process", response_model=SupervisorResponse)
-async def process_user_request(request: UserRequest):
-    """사용자 요청을 처리하고 적절한 에이전트를 선택하여 실행합니다 (LangGraph 기반)."""
+@router.post("/process")
+async def process_user_intent(user_intent: UserIntent):
+    """사용자 의도를 처리하고 적절한 에이전트를 선택하여 실행합니다."""
     try:
+        response = await supervisor.process_user_intent(user_intent)
+        # SupervisorResponse를 딕셔너리로 변환하여 반환
+        return {
+            "success": response.success,
+            "content": response.response.content,
+            "agent_type": response.response.agent_type,
+            "selected_agent": response.selected_agent,
+            "selected_agents": response.metadata.get("selected_agents", [response.selected_agent]),
+            "reasoning": response.reasoning,
+            "metadata": {
+                **response.metadata,
+                "agent_responses": response.metadata.get("agent_responses", []),
+                "total_agents_executed": len(response.metadata.get("selected_agents", [])),
+                "successful_agents": response.metadata.get("agent_responses", [])
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"처리 중 오류가 발생했습니다: {str(e)}")
+
+@router.post("/chat")
+async def chat_with_agent(chat_request: ChatRequest) -> ChatResponse:
+    """사용자 메시지를 받아서 supervisor를 통해 적절한 에이전트로 라우팅합니다."""
+    try:
+        # UserIntent로 변환
         user_intent = UserIntent(
-            user_id=request.user_id,
-            message=request.message,
-            context=request.context
+            message=chat_request.message,
+            user_id=chat_request.user_id
         )
         
-        response = await supervisor.process_user_intent(user_intent)
-        return response
+        # Supervisor를 통해 처리
+        supervisor_response = await supervisor.process_user_intent(user_intent)
         
+        # ChatResponse로 변환
+        return ChatResponse(
+            success=supervisor_response.success,
+            message=supervisor_response.response.content if supervisor_response.success else supervisor_response.response,
+            agent_type=supervisor_response.response.agent_type if supervisor_response.success else "unknown",
+            metadata=supervisor_response.response.metadata if supervisor_response.success else {}
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"요청 처리 중 오류가 발생했습니다: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"채팅 처리 중 오류가 발생했습니다: {str(e)}")
 
-@router.post("/agent/{agent_type}", response_model=AgentResponse)
-async def process_with_specific_agent(agent_type: str, request: AgentRequest):
-    """특정 에이전트로 요청을 처리합니다."""
+@router.get("/agents")
+async def get_agents():
+    """등록된 모든 에이전트 정보를 반환합니다."""
     try:
-        agent = agent_registry.get_agent(agent_type)
-        if not agent:
-            raise HTTPException(status_code=404, detail=f"에이전트를 찾을 수 없습니다: {agent_type}")
-        
-        response = await agent.process(request.message, request.user_id)
-        return response
-        
-    except HTTPException:
-        raise
+        agents = agent_registry.get_agent_descriptions()
+        return {
+            "agents": agents,
+            "total_count": len(agents),
+            "timestamp": datetime.utcnow().isoformat()
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"에이전트 실행 중 오류가 발생했습니다: {str(e)}")
-
-@router.get("/agents", response_model=Dict[str, str])
-async def get_available_agents():
-    """사용 가능한 에이전트 목록을 반환합니다."""
-    try:
-        return supervisor.get_available_agents()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"에이전트 목록 조회 중 오류가 발생했습니다: {str(e)}")
-
-@router.get("/agents/{agent_type}/tools")
-async def get_agent_tools(agent_type: str):
-    """특정 에이전트의 사용 가능한 도구 목록을 반환합니다."""
-    try:
-        agent = agent_registry.get_agent(agent_type)
-        if not agent:
-            raise HTTPException(status_code=404, detail=f"에이전트를 찾을 수 없습니다: {agent_type}")
-        
-        # 챗봇 에이전트의 경우 도구 목록 반환
-        if hasattr(agent, 'get_available_tools'):
-            tools = agent.get_available_tools()
-            return {"agent_type": agent_type, "tools": tools}
-        elif hasattr(agent, 'get_available_operations'):
-            operations = agent.get_available_operations()
-            return {"agent_type": agent_type, "operations": operations}
-        else:
-            return {"agent_type": agent_type, "tools": []}
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"도구 목록 조회 중 오류가 발생했습니다: {str(e)}")
-
-@router.post("/agents/{agent_type}/tools/{tool_name}")
-async def execute_specific_tool(agent_type: str, tool_name: str, request: AgentRequest):
-    """특정 에이전트의 특정 도구를 실행합니다."""
-    try:
-        agent = agent_registry.get_agent(agent_type)
-        if not agent:
-            raise HTTPException(status_code=404, detail=f"에이전트를 찾을 수 없습니다: {agent_type}")
-        
-        # 챗봇 에이전트의 경우 특정 도구 실행
-        if hasattr(agent, 'process_with_specific_tool'):
-            response = await agent.process_with_specific_tool(
-                request.message, 
-                tool_name,
-                user_id=request.user_id
-            )
-            return response
-        else:
-            raise HTTPException(status_code=400, detail=f"에이전트 {agent_type}는 도구 실행을 지원하지 않습니다.")
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"도구 실행 중 오류가 발생했습니다: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"에이전트 정보 조회 중 오류: {str(e)}")
 
 @router.get("/health")
 async def health_check():
-    """시스템 상태를 확인합니다."""
+    """시스템 상태 확인"""
     try:
-        available_agents = supervisor.get_available_agents()
-        return {
+        # 기본 상태 확인
+        status = {
             "status": "healthy",
-            "available_agents": list(available_agents.keys()),
-            "graph_execution": True,
-            "langgraph_based": True
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"시스템 상태 확인 중 오류가 발생했습니다: {str(e)}")
-
-@router.get("/graph/info")
-async def get_graph_info():
-    """LangGraph 워크플로우 정보를 반환합니다."""
-    try:
-        return supervisor.get_graph_info()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"그래프 정보 조회 중 오류가 발생했습니다: {str(e)}")
-
-@router.get("/graph/visualize")
-async def visualize_graph():
-    """LangGraph 워크플로우를 Mermaid 형식으로 시각화합니다."""
-    try:
-        mermaid_diagram = supervisor.visualize_graph()
-        return {
-            "mermaid": mermaid_diagram,
-            "format": "mermaid",
-            "description": "LangGraph 워크플로우 다이어그램"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"그래프 시각화 중 오류가 발생했습니다: {str(e)}")
-
-@router.get("/debug/state")
-async def get_debug_state():
-    """디버깅을 위한 시스템 상태 정보를 반환합니다."""
-    try:
-        return {
-            "supervisor": {
-                "type": "LangGraphSupervisor",
-                "llm_available": supervisor.llm is not None,
-                "agent_count": len(supervisor.get_available_agents())
-            },
-            "agent_registry": {
-                "registered_agents": list(agent_registry.get_agent_types()),
-                "agent_nodes": list(agent_registry.get_all_agent_nodes().keys())
-            },
-            "graph": supervisor.get_graph_info(),
+            "timestamp": datetime.utcnow().isoformat(),
+            "version": "3.0.0",
             "framework": "LangGraph"
         }
+        
+        # 에이전트 상태 확인
+        agents = agent_registry.get_agent_descriptions()
+        status["agents"] = {
+            "total": len(agents),
+            "available": list(agents.keys())
+        }
+        
+        # 데이터 수집 상태 확인
+        status["data_collection"] = {
+            "active_users": list(data_collection_managers.keys()),
+            "total_managers": len(data_collection_managers)
+        }
+        
+        return status
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"디버그 정보 조회 중 오류가 발생했습니다: {str(e)}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }
 
-# RAG 관련 라우터 추가
-rag_router = APIRouter(prefix="/rag", tags=["RAG"])
+# 데이터 수집 제어 엔드포인트들
 
-@rag_router.post("/process")
-async def process_knowledge(request: Dict[str, Any]):
-    """지식을 처리하여 벡터 DB와 그래프 DB에 저장합니다."""
+@router.post("/data-collection/start/{user_id}")
+async def start_data_collection(user_id: int):
+    """특정 사용자의 데이터 수집을 시작합니다."""
     try:
-        from agents.chatbot_agent.knowledge_processor import KnowledgeProcessor
-        from config.settings import settings
-        
-        # KnowledgeProcessor 초기화
-        processor = KnowledgeProcessor(
-            openai_api_key=settings.OPENAI_API_KEY,
-            ollama_base_url=settings.OLLAMA_BASE_URL,
-            ollama_model=settings.OLLAMA_MODEL,
-            milvus_host=settings.MILVUS_HOST,
-            milvus_port=settings.MILVUS_PORT,
-            milvus_collection=settings.MILVUS_COLLECTION,
-            neo4j_uri=settings.NEO4J_URI,
-            neo4j_username=settings.NEO4J_USERNAME,
-            neo4j_password=settings.NEO4J_PASSWORD
-        )
-        
-        # 지식 처리
-        result = await processor.process_knowledge(
-            content=request.get("content", ""),
-            title=request.get("title", ""),
-            source=request.get("source", ""),
-            document_type=request.get("document_type", "text"),
-            metadata=request.get("metadata", {})
-        )
-        
+        start_user_data_collection(user_id)
         return {
             "success": True,
-            "result": {
-                "document_id": result.document_id,
-                "chunks_created": result.chunks_created,
-                "vectors_created": result.vectors_created,
-                "graph_nodes_created": result.graph_nodes_created,
-                "processing_time": result.processing_time,
-                "status": result.status
+            "message": f"사용자 {user_id}의 데이터 수집이 시작되었습니다.",
+            "user_id": user_id,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"데이터 수집 시작 오류: {str(e)}")
+
+@router.post("/data-collection/stop/{user_id}")
+async def stop_data_collection(user_id: int):
+    """특정 사용자의 데이터 수집을 중지합니다."""
+    try:
+        stop_user_data_collection(user_id)
+        return {
+            "success": True,
+            "message": f"사용자 {user_id}의 데이터 수집이 중지되었습니다.",
+            "user_id": user_id,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"데이터 수집 중지 오류: {str(e)}")
+
+@router.post("/data-collection/stop-all")
+async def stop_all_data_collection_endpoint():
+    """모든 사용자의 데이터 수집을 중지합니다."""
+    try:
+        stop_all_data_collection()
+        return {
+            "success": True,
+            "message": "모든 사용자의 데이터 수집이 중지되었습니다.",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"데이터 수집 중지 오류: {str(e)}")
+
+@router.get("/data-collection/status")
+async def get_data_collection_status():
+    """데이터 수집 상태를 확인합니다."""
+    try:
+        active_users = list(data_collection_managers.keys())
+        managers_info = {}
+        
+        for user_id, manager in data_collection_managers.items():
+            managers_info[user_id] = {
+                "running": manager.running,
+                "thread_alive": manager.collection_thread.is_alive() if manager.collection_thread else False
             }
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"지식 처리 중 오류가 발생했습니다: {str(e)}")
-
-@rag_router.get("/search")
-async def search_knowledge(query: str, top_k: int = 5, search_type: str = "hybrid"):
-    """지식베이스에서 관련 정보를 검색합니다."""
-    try:
-        from agents.chatbot_agent.rag_engine import RAGEngine
-        from agents.chatbot_agent.embedder import Embedder
-        from agents.chatbot_agent.vector_store import MilvusVectorStore
-        from agents.chatbot_agent.graph_store import Neo4jGraphStore
-        from config.settings import settings
-        
-        # RAG 엔진 초기화
-        embedder = Embedder(
-            model_name=settings.OPENAI_MODEL,
-            openai_api_key=settings.OPENAI_API_KEY,
-            ollama_base_url=settings.OLLAMA_BASE_URL,
-            ollama_model=settings.OLLAMA_MODEL
-        )
-        
-        vector_store = MilvusVectorStore(
-            host=settings.MILVUS_HOST,
-            port=settings.MILVUS_PORT,
-            collection_name=settings.MILVUS_COLLECTION,
-            dimension=embedder.get_embedding_dimension()
-        )
-        
-        graph_store = Neo4jGraphStore(
-            uri=settings.NEO4J_URI,
-            username=settings.NEO4J_USERNAME,
-            password=settings.NEO4J_PASSWORD
-        )
-        
-        rag_engine = RAGEngine(
-            vector_store=vector_store,
-            graph_store=graph_store,
-            embedder=embedder
-        )
-        
-        # 검색 실행
-        response = rag_engine.query(query, top_k=top_k, search_type=search_type)
         
         return {
-            "success": True,
-            "query": query,
-            "answer": response.answer,
-            "sources": [
-                {
-                    "text": source.text,
-                    "score": source.score,
-                    "source": source.source,
-                    "metadata": source.metadata
-                }
-                for source in response.sources
-            ],
-            "search_type": search_type,
-            "top_k": top_k
+            "active_users": active_users,
+            "total_managers": len(data_collection_managers),
+            "managers_info": managers_info,
+            "timestamp": datetime.utcnow().isoformat()
         }
-        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"검색 중 오류가 발생했습니다: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"상태 조회 오류: {str(e)}")
 
-# RAG 라우터를 메인 라우터에 포함
-router.include_router(rag_router)
-
-# 멀티모달 라우터 추가
-from .multimodal_routes import router as multimodal_router
-router.include_router(multimodal_router) 
+@router.get("/data-collection/stats")
+async def get_data_collection_stats():
+    """데이터 수집 통계를 확인합니다."""
+    try:
+        from database.models import UserFile, BrowserHistory, ActiveApplication, ScreenActivity
+        from database.connection import get_db_session
+        
+        db_session = get_db_session()
+        
+        # 각 테이블의 레코드 수 조회
+        file_count = db_session.query(UserFile).count()
+        browser_count = db_session.query(BrowserHistory).count()
+        app_count = db_session.query(ActiveApplication).count()
+        screen_count = db_session.query(ScreenActivity).count()
+        
+        # 최근 24시간 내 데이터 수
+        from datetime import datetime, timedelta
+        yesterday = datetime.utcnow() - timedelta(days=1)
+        
+        recent_files = db_session.query(UserFile).filter(
+            UserFile.discovered_at >= yesterday
+        ).count()
+        
+        recent_browser = db_session.query(BrowserHistory).filter(
+            BrowserHistory.recorded_at >= yesterday
+        ).count()
+        
+        recent_apps = db_session.query(ActiveApplication).filter(
+            ActiveApplication.recorded_at >= yesterday
+        ).count()
+        
+        recent_screens = db_session.query(ScreenActivity).filter(
+            ScreenActivity.captured_at >= yesterday
+        ).count()
+        
+        return {
+            "total_records": {
+                "files": file_count,
+                "browser_history": browser_count,
+                "active_applications": app_count,
+                "screen_activities": screen_count
+            },
+            "last_24_hours": {
+                "files": recent_files,
+                "browser_history": recent_browser,
+                "active_applications": recent_apps,
+                "screen_activities": recent_screens
+            },
+            "active_collectors": len(data_collection_managers),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"통계 조회 오류: {str(e)}") 
