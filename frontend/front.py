@@ -17,6 +17,9 @@ class FloatingChatApp:
         self.root = tk.Tk()
         self.root.title("JAVIS Floating Chat")
         
+        # 한글 폰트 설정
+        self.setup_korean_fonts()
+        
         # API 설정
         self.API_BASE_URL = "http://localhost:8000"
         
@@ -37,6 +40,40 @@ class FloatingChatApp:
         
         # ESC 키로 채팅창 닫기
         self.root.bind('<Escape>', self.close_chat_window)
+    
+    def setup_korean_fonts(self):
+        """한글 폰트를 설정합니다."""
+        # Windows에서 사용 가능한 한글 폰트들
+        korean_fonts = [
+            'Malgun Gothic',  # 맑은 고딕 (Windows 기본)
+            'Nanum Gothic',   # 나눔고딕
+            'Nanum Barun Gothic',  # 나눔바른고딕
+            'Dotum',          # 돋움
+            'Gulim',          # 굴림
+            'Batang',         # 바탕
+            'Arial Unicode MS'  # Arial Unicode MS
+        ]
+        
+        # 사용 가능한 폰트 찾기
+        self.default_font = 'Arial'  # 기본값
+        for font in korean_fonts:
+            try:
+                # 폰트 존재 여부 확인
+                test_label = tk.Label(self.root, font=(font, 12))
+                test_label.destroy()
+                self.default_font = font
+                print(f"한글 폰트 설정: {font}")
+                break
+            except:
+                continue
+        
+        # 폰트 크기 설정
+        self.title_font = (self.default_font, 18, 'bold')
+        self.subtitle_font = (self.default_font, 12)
+        self.message_font = (self.default_font, 12)
+        self.input_font = (self.default_font, 14)
+        self.button_font = (self.default_font, 12, 'bold')
+        self.emoji_font = (self.default_font, 22)
         
     def create_floating_button(self):
         """플로팅 버튼 생성"""
@@ -80,7 +117,7 @@ class FloatingChatApp:
         self.button_canvas.create_text(
             35, 35,
             text="💬",
-            font=('Arial', 22),
+            font=self.emoji_font,
             fill='white',
             tags='text'
         )
@@ -215,7 +252,7 @@ class FloatingChatApp:
         title_label = tk.Label(
             header_frame,
             text="JAVIS AI Assistant",
-            font=('Arial', 18, 'bold'),
+            font=self.title_font,
             bg='#4f46e5',
             fg='white'
         )
@@ -225,7 +262,7 @@ class FloatingChatApp:
         subtitle_label = tk.Label(
             header_frame,
             text="Multi-Agent System",
-            font=('Arial', 12),
+            font=self.subtitle_font,
             bg='#4f46e5',
             fg='#e0e7ff'
         )
@@ -259,7 +296,7 @@ class FloatingChatApp:
         # 메시지 입력
         self.message_input = tk.Entry(
             input_frame,
-            font=('Arial', 14),
+            font=self.input_font,
             relief='solid',
             borderwidth=2,
             bg='#f9fafb'
@@ -271,7 +308,7 @@ class FloatingChatApp:
         send_button = tk.Button(
             input_frame,
             text="전송",
-            font=('Arial', 12, 'bold'),
+            font=self.button_font,
             bg='#4f46e5',
             fg='white',
             relief='flat',
@@ -333,7 +370,7 @@ class FloatingChatApp:
         user_label = tk.Label(
             message_frame,
             text=message,
-            font=('Arial', 12),
+            font=self.message_font,
             bg='#eef2ff',
             fg='#111827',
             wraplength=350,
@@ -356,8 +393,8 @@ class FloatingChatApp:
         # 봇 메시지 (좌측 정렬)
         bot_label = tk.Label(
             message_frame,
-            text=message,
-            font=('Arial', 12),
+            text="",
+            font=self.message_font,
             bg='#f3f4f6',
             fg='#111827',
             wraplength=350,
@@ -372,6 +409,68 @@ class FloatingChatApp:
         self.messages_canvas.update_idletasks()
         self.messages_canvas.yview_moveto(1)
         
+        # 타이핑 애니메이션 시작
+        self.animate_typing(bot_label, message)
+    
+    def animate_typing(self, label, full_text, current_index=0):
+        """타이핑 애니메이션을 실행합니다."""
+        if current_index <= len(full_text):
+            # 현재까지의 텍스트 표시
+            current_text = full_text[:current_index]
+            label.config(text=current_text)
+            
+            # 다음 글자로 진행
+            if current_index < len(full_text):
+                # 타이핑 속도 조절 (밀리초)
+                typing_speed = 30  # 빠른 타이핑
+                self.root.after(typing_speed, lambda: self.animate_typing(label, full_text, current_index + 1))
+            
+            # 스크롤을 맨 아래로 유지
+            self.messages_canvas.update_idletasks()
+            self.messages_canvas.yview_moveto(1)
+    
+    def show_loading_message(self):
+        """로딩 메시지를 표시합니다."""
+        message_frame = tk.Frame(self.scrollable_frame, bg='white')
+        message_frame.pack(fill='x', pady=8)
+        
+        # 로딩 메시지 (좌측 정렬)
+        loading_label = tk.Label(
+            message_frame,
+            text="답변을 생성하고 있습니다...",
+            font=self.message_font,
+            bg='#f3f4f6',
+            fg='#6b7280',
+            wraplength=350,
+            justify='left',
+            padx=15,
+            pady=10,
+            relief='flat'
+        )
+        loading_label.pack(side='left', padx=(0, 100))
+        
+        # 로딩 애니메이션 시작
+        self.animate_loading(loading_label)
+        
+        # 스크롤을 맨 아래로
+        self.messages_canvas.update_idletasks()
+        self.messages_canvas.yview_moveto(1)
+        
+        return loading_label
+    
+    def animate_loading(self, label, dots=0):
+        """로딩 애니메이션을 실행합니다."""
+        dots_text = "." * (dots + 1)
+        label.config(text=f"답변을 생성하고 있습니다{dots_text}")
+        
+        # 다음 애니메이션 프레임
+        self.root.after(500, lambda: self.animate_loading(label, (dots + 1) % 4))
+    
+    def remove_loading_message(self, loading_label):
+        """로딩 메시지를 제거합니다."""
+        if loading_label and loading_label.winfo_exists():
+            loading_label.master.destroy()
+    
     def send_message(self, event=None):
         """메시지 전송"""
         message = self.message_input.get().strip()
@@ -384,10 +483,13 @@ class FloatingChatApp:
         # 사용자 메시지 표시
         self.add_user_message(message)
         
-        # 백그라운드에서 API 호출
-        threading.Thread(target=self.get_bot_response, args=(message,), daemon=True).start()
+        # 로딩 메시지 표시
+        loading_label = self.show_loading_message()
         
-    def get_bot_response(self, message):
+        # 백그라운드에서 API 호출
+        threading.Thread(target=self.get_bot_response, args=(message, loading_label), daemon=True).start()
+        
+    def get_bot_response(self, message, loading_label):
         """봇 응답 가져오기"""
         try:
             # API 호출 - Supervisor 기반 처리
@@ -411,7 +513,15 @@ class FloatingChatApp:
             bot_response = "Sorry, I'm having trouble connecting to the server."
             
         # 메인 스레드에서 UI 업데이트
-        self.root.after(0, lambda: self.add_bot_message(bot_response))
+        self.root.after(0, lambda: self.handle_bot_response(bot_response, loading_label))
+    
+    def handle_bot_response(self, bot_response, loading_label):
+        """봇 응답을 처리합니다."""
+        # 로딩 메시지 제거
+        self.remove_loading_message(loading_label)
+        
+        # 타이핑 애니메이션으로 봇 메시지 표시
+        self.add_bot_message(bot_response)
         
     def run(self):
         """애플리케이션 실행"""
