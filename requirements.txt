@@ -1,0 +1,30 @@
+# Core dependencies
+torch>=2.0.0
+transformers>=4.46.0
+numpy>=1.24.0
+Pillow>=10.0.0
+PyYAML>=6.0
+
+# Vector database
+qdrant-client>=1.7.0
+
+# Embedding and RAG
+byaldi>=0.0.7
+rerankers[monovlm]>=0.2.0
+
+# VLM dependencies
+qwen-vl-utils>=0.0.8
+bitsandbytes>=0.41.0
+
+# Database
+psutil>=5.9.0
+
+# File processing
+PyPDF2>=3.0.0
+python-docx>=0.8.11
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# Utilities
+python-dotenv>=1.0.0
+requests>=2.31.0

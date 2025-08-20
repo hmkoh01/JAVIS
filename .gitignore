@@ -228,7 +228,6 @@ credentials.json
 *.csv
 *.json
 *.xml
-*.txt
 data/
 datasets/
 
