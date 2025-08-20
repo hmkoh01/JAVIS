@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.routes import router
 from core.supervisor import supervisor
 from core.agent_registry import agent_registry
-from database.connection import create_tables
+from database.sqlite_meta import SQLiteMeta  # 변경됨: SQLAlchemy 대신 SQLiteMeta 사용
 from database.data_collector import start_user_data_collection, stop_all_data_collection
 from config.settings import settings
 
@@ -32,10 +32,10 @@ async def startup_event():
     """애플리케이션 시작 시 초기화"""
     print("🚀 JAVIS Multi-Agent System 시작")
     
-    # 데이터베이스 테이블 생성
+    # SQLite 데이터베이스 초기화
     try:
-        create_tables()
-        print("✅ 데이터베이스 테이블 생성 완료")
+        sqlite_meta = SQLiteMeta()
+        print("✅ SQLite 데이터베이스 초기화 완료")
     except Exception as e:
         print(f"⚠️ 데이터베이스 초기화 오류: {e}")
     

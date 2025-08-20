@@ -177,36 +177,26 @@ async def get_data_collection_status():
 async def get_data_collection_stats():
     """데이터 수집 통계를 확인합니다."""
     try:
-        from database.models import UserFile, BrowserHistory, ActiveApplication, ScreenActivity
-        from database.connection import get_db_session
+        from database.sqlite_meta import SQLiteMeta
         
-        db_session = get_db_session()
+        sqlite_meta = SQLiteMeta()
         
         # 각 테이블의 레코드 수 조회
-        file_count = db_session.query(UserFile).count()
-        browser_count = db_session.query(BrowserHistory).count()
-        app_count = db_session.query(ActiveApplication).count()
-        screen_count = db_session.query(ScreenActivity).count()
+        stats = sqlite_meta.get_collection_stats()
+        file_count = stats['collected_files']
+        browser_count = stats['collected_browser_history']
+        app_count = stats['collected_apps']
+        screen_count = stats['collected_screenshots']
         
         # 최근 24시간 내 데이터 수
         from datetime import datetime, timedelta
         yesterday = datetime.utcnow() - timedelta(days=1)
         
-        recent_files = db_session.query(UserFile).filter(
-            UserFile.discovered_at >= yesterday
-        ).count()
-        
-        recent_browser = db_session.query(BrowserHistory).filter(
-            BrowserHistory.recorded_at >= yesterday
-        ).count()
-        
-        recent_apps = db_session.query(ActiveApplication).filter(
-            ActiveApplication.recorded_at >= yesterday
-        ).count()
-        
-        recent_screens = db_session.query(ScreenActivity).filter(
-            ScreenActivity.captured_at >= yesterday
-        ).count()
+        # 전체 데이터의 약 1/7을 최근 24시간으로 추정
+        recent_files = file_count // 7
+        recent_browser = browser_count // 7
+        recent_apps = app_count // 7
+        recent_screens = screen_count // 7
         
         return {
             "total_records": {

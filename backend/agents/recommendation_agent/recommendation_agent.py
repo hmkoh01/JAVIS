@@ -2,8 +2,7 @@ import numpy as np
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from ..base_agent import BaseAgent, AgentResponse
-from database.models import User, UserInteraction, KnowledgeBase
-from database.connection import get_db_session
+from database.sqlite_meta import SQLiteMeta  # 변경됨: SQLAlchemy 대신 SQLiteMeta 사용
 
 class RecommendationAgent(BaseAgent):
     """추천 및 제안 관련 작업을 처리하는 에이전트"""
@@ -13,9 +12,41 @@ class RecommendationAgent(BaseAgent):
             agent_type="recommendation",
             description="추천, 제안, 추천해줘 등의 요청을 처리합니다."
         )
+        self.sqlite_meta = SQLiteMeta()  # SQLite 메타데이터 접근
     
-    async def process(self, user_input: str, user_id: Optional[int] = None) -> AgentResponse:
-        """사용자 입력을 처리합니다."""
+    def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """상태를 받아서 처리하고 수정된 상태를 반환합니다."""
+        question = state.get("question", "")
+        user_id = state.get("user_id")
+        
+        if not question:
+            return {**state, "answer": "질문이 제공되지 않았습니다.", "evidence": []}
+        
+        try:
+            # 간단한 추천 관련 응답
+            response_content = f"추천 에이전트가 '{question}' 요청을 처리했습니다. 현재는 기본 응답만 제공합니다."
+            
+            return {
+                **state,
+                "answer": response_content,
+                "evidence": [],
+                "agent_type": "recommendation",
+                "metadata": {
+                    "query": question,
+                    "user_id": user_id,
+                    "agent_type": "recommendation"
+                }
+            }
+        except Exception as e:
+            return {
+                **state,
+                "answer": f"추천 에이전트 처리 중 오류가 발생했습니다: {str(e)}",
+                "evidence": [],
+                "agent_type": "recommendation"
+            }
+    
+    async def process_async(self, user_input: str, user_id: Optional[int] = None) -> AgentResponse:
+        """사용자 입력을 처리합니다. (기존 호환성을 위한 메서드)"""
         try:
             # 간단한 추천 관련 응답
             response_content = f"추천 에이전트가 '{user_input}' 요청을 처리했습니다. 현재는 기본 응답만 제공합니다."
@@ -53,64 +84,28 @@ class RecommendationAgent(BaseAgent):
     async def _recommend_knowledge(self, user_id: int, user_input: str) -> AgentResponse:
         """지식 기반 추천을 생성합니다."""
         try:
-            db = get_db_session()
+            # SQLite에서 사용자 데이터 조회
+            collected_files = self.sqlite_meta.get_collected_files(user_id)
+            collected_browser = self.sqlite_meta.get_collected_browser_history(user_id)
+            collected_apps = self.sqlite_meta.get_collected_apps(user_id)
             
-            # 사용자 상호작용 히스토리 분석
-            user_interactions = db.query(UserInteraction).filter(
-                UserInteraction.user_id == user_id
-            ).order_by(UserInteraction.timestamp.desc()).limit(50).all()
+            # 사용자 관심사 추출 (간단한 방법)
+            interests = self._extract_interests_from_data(collected_files, collected_browser, collected_apps)
             
-            # 사용자 관심사 추출
-            interests = self._extract_user_interests(user_interactions)
-            
-            # 지식베이스에서 관련 항목 검색
-            knowledge_items = db.query(KnowledgeBase).all()
-            
-            if not knowledge_items:
-                return AgentResponse(
-                    success=True,
-                    content="추천할 지식 항목이 없습니다.",
-                    agent_type=self.agent_type
-                )
-            
-            # 관련성 점수 계산
-            scored_items = []
-            for item in knowledge_items:
-                score = self._calculate_relevance_score(item, interests, user_input)
-                scored_items.append((item, score))
-            
-            # 점수순으로 정렬
-            scored_items.sort(key=lambda x: x[1], reverse=True)
-            
-            # 상위 5개 추천
-            top_recommendations = scored_items[:5]
-            
-            recommendations = []
-            for item, score in top_recommendations:
-                recommendations.append({
-                    "title": item.title,
-                    "content": item.content[:200] + "..." if len(item.content) > 200 else item.content,
-                    "category": item.category,
-                    "tags": item.tags,
-                    "relevance_score": score,
-                    "type": "knowledge"
-                })
+            # 기본 추천 로직
+            recommendations = self._generate_basic_recommendations(interests, user_input)
             
             return AgentResponse(
                 success=True,
-                content={
-                    "recommendations": recommendations,
-                    "user_interests": interests,
-                    "total_items": len(knowledge_items)
-                },
+                content=f"추천 결과: {recommendations}",
                 agent_type=self.agent_type,
-                metadata={"recommendation_type": "knowledge"}
+                metadata={"user_id": user_id, "interests": interests}
             )
             
         except Exception as e:
             return AgentResponse(
                 success=False,
-                content=f"지식 추천 생성 중 오류: {str(e)}",
+                content=f"지식 추천 중 오류: {str(e)}",
                 agent_type=self.agent_type
             )
     
@@ -190,13 +185,16 @@ class RecommendationAgent(BaseAgent):
                 agent_type=self.agent_type
             )
     
-    def _extract_user_interests(self, interactions: List[UserInteraction]) -> List[str]:
-        """사용자 상호작용에서 관심사를 추출합니다."""
+    def _extract_interests_from_data(self, collected_files: List[Dict[str, Any]], 
+                                   collected_browser: List[Dict[str, Any]], 
+                                   collected_apps: List[Dict[str, Any]]) -> List[str]:
+        """수집된 데이터에서 사용자 관심사를 추출합니다."""
         interests = []
         
-        for interaction in interactions:
-            # 질문에서 키워드 추출 (간단한 구현)
-            query_lower = interaction.query.lower()
+        # 파일명에서 관심사 추출
+        for file_info in collected_files:
+            file_name = file_info.get('file_name', '').lower()
+            file_path = file_info.get('file_path', '').lower()
             
             # 일반적인 관심사 키워드
             interest_keywords = [
@@ -206,7 +204,25 @@ class RecommendationAgent(BaseAgent):
             ]
             
             for keyword in interest_keywords:
-                if keyword in query_lower:
+                if keyword in file_name or keyword in file_path:
+                    interests.append(keyword)
+        
+        # 브라우저 히스토리에서 관심사 추출
+        for browser_info in collected_browser:
+            url = browser_info.get('url', '').lower()
+            title = browser_info.get('title', '').lower()
+            
+            for keyword in interest_keywords:
+                if keyword in url or keyword in title:
+                    interests.append(keyword)
+        
+        # 앱 사용에서 관심사 추출
+        for app_info in collected_apps:
+            app_name = app_info.get('app_name', '').lower()
+            window_title = app_info.get('window_title', '').lower()
+            
+            for keyword in interest_keywords:
+                if keyword in app_name or keyword in window_title:
                     interests.append(keyword)
         
         # 중복 제거 및 빈도순 정렬
@@ -220,22 +236,23 @@ class RecommendationAgent(BaseAgent):
     async def _get_user_interests(self, user_id: int) -> List[str]:
         """사용자 관심사를 가져옵니다."""
         try:
-            db = next(get_db())
-            interactions = db.query(UserInteraction).filter(
-                UserInteraction.user_id == user_id
-            ).order_by(UserInteraction.timestamp.desc()).limit(50).all()
+            # SQLite에서 사용자 데이터 조회
+            collected_files = self.sqlite_meta.get_collected_files(user_id)
+            collected_browser = self.sqlite_meta.get_collected_browser_history(user_id)
+            collected_apps = self.sqlite_meta.get_collected_apps(user_id)
             
-            return self._extract_user_interests(interactions)
-        except:
+            return self._extract_interests_from_data(collected_files, collected_browser, collected_apps)
+        except Exception as e:
+            print(f"사용자 관심사 추출 오류: {e}")
             return []
     
-    def _calculate_relevance_score(self, item: KnowledgeBase, interests: List[str], user_input: str) -> float:
+    def _calculate_relevance_score(self, item: Dict[str, Any], interests: List[str], user_input: str) -> float:
         """지식 항목의 관련성 점수를 계산합니다."""
         score = 0.0
         
         # 사용자 관심사와의 매칭
-        item_content_lower = item.content.lower()
-        item_title_lower = item.title.lower()
+        item_content_lower = item.get('content', '').lower()
+        item_title_lower = item.get('title', '').lower()
         
         for interest in interests:
             if interest.lower() in item_content_lower:
@@ -251,43 +268,63 @@ class RecommendationAgent(BaseAgent):
             score += 2.0
         
         # 태그 매칭
-        for tag in item.tags:
+        tags = item.get('tags', [])
+        for tag in tags:
             if tag.lower() in user_input_lower:
                 score += 1.0
         
         return score
     
+    def _generate_basic_recommendations(self, interests: List[str], user_input: str) -> List[Dict[str, Any]]:
+        """기본 추천을 생성합니다."""
+        recommendations = []
+        
+        # 관심사 기반 추천
+        for interest in interests[:5]:  # 상위 5개 관심사
+            recommendations.append({
+                "type": "interest_based",
+                "title": f"{interest} 관련 학습 자료",
+                "description": f"{interest}에 대한 학습 자료를 추천합니다.",
+                "interest": interest,
+                "priority": "high"
+            })
+        
+        # 사용자 입력 기반 추천
+        if user_input:
+            recommendations.append({
+                "type": "query_based",
+                "title": f"'{user_input}' 관련 추천",
+                "description": f"사용자 질문 '{user_input}'에 대한 관련 자료를 추천합니다.",
+                "query": user_input,
+                "priority": "high"
+            })
+        
+        return recommendations
+    
     async def _analyze_user_profile(self, user_id: int) -> Dict[str, Any]:
         """사용자 프로필을 분석합니다."""
         try:
-            db = get_db_session()
-            
-            # 사용자 정보
-            user = db.query(User).filter(User.id == user_id).first()
-            
-            # 상호작용 분석
-            interactions = db.query(UserInteraction).filter(
-                UserInteraction.user_id == user_id
-            ).all()
-            
-            # 에이전트별 사용 빈도
-            agent_usage = {}
-            for interaction in interactions:
-                agent_type = interaction.agent_type
-                agent_usage[agent_type] = agent_usage.get(agent_type, 0) + 1
+            # SQLite에서 사용자 데이터 조회
+            collected_files = self.sqlite_meta.get_collected_files(user_id)
+            collected_browser = self.sqlite_meta.get_collected_browser_history(user_id)
+            collected_apps = self.sqlite_meta.get_collected_apps(user_id)
             
             # 관심사 추출
-            interests = self._extract_user_interests(interactions)
+            interests = self._extract_interests_from_data(collected_files, collected_browser, collected_apps)
+            
+            # 간단한 사용자 프로필 생성
+            total_interactions = len(collected_files) + len(collected_browser) + len(collected_apps)
+            experience_level = self._estimate_experience_level_simple(total_interactions)
             
             return {
                 "user_id": user_id,
-                "username": user.username if user else "Unknown",
-                "total_interactions": len(interactions),
-                "agent_usage": agent_usage,
+                "username": f"User_{user_id}",
+                "total_interactions": total_interactions,
+                "agent_usage": {"general": total_interactions},
                 "interests": interests,
-                "experience_level": self._estimate_experience_level(interactions)
+                "experience_level": experience_level
             }
-        except:
+        except Exception as e:
             return {
                 "user_id": user_id,
                 "username": "Unknown",
@@ -297,11 +334,11 @@ class RecommendationAgent(BaseAgent):
                 "experience_level": "beginner"
             }
     
-    def _estimate_experience_level(self, interactions: List[UserInteraction]) -> str:
+    def _estimate_experience_level_simple(self, total_interactions: int) -> str:
         """사용자의 경험 수준을 추정합니다."""
-        if len(interactions) < 10:
+        if total_interactions < 10:
             return "beginner"
-        elif len(interactions) < 50:
+        elif total_interactions < 50:
             return "intermediate"
         else:
             return "advanced"

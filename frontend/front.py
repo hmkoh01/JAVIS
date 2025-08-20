@@ -334,7 +334,7 @@ class FloatingChatApp:
             # 버튼 숨기기
             self.root.withdraw()
             # 채팅창을 버튼 위치에 표시 
-            button_x = self.root.winfo_x() - 450
+            button_x = self.root.winfo_x() - 420
             button_y = self.root.winfo_y() - 550
             self.chat_window.geometry(f'500x600+{button_x}+{button_y}')
             self.chat_window.deiconify()

@@ -35,24 +35,48 @@ class AgentRegistry:
         """새로운 에이전트를 등록합니다."""
         self._agents[agent.agent_type] = agent
         
-        # LangGraph 노드 함수 생성
+        # LangGraph 노드 함수 생성 (새로운 process(state) 패턴 지원)
         async def agent_node(state):
             """에이전트 실행 노드"""
             try:
                 user_input = state.get("user_input", "")
                 user_id = state.get("user_id")
                 
-                # 에이전트 실행
-                response = await agent.process(user_input, user_id)
-                
-                # 상태 업데이트
-                new_state = state.copy()
-                new_state["agent_response"] = response.content
-                new_state["agent_success"] = response.success
-                new_state["agent_type"] = agent.agent_type
-                new_state["agent_metadata"] = response.metadata or {}
-                
-                return new_state
+                # 새로운 process(state) 패턴 지원
+                if hasattr(agent, 'process') and callable(getattr(agent, 'process')):
+                    # 새로운 패턴 사용
+                    agent_state = {
+                        "question": user_input,
+                        "user_id": user_id,
+                        "session_id": state.get("user_context", {}).get("session_id"),
+                        "filters": state.get("user_context", {}).get("filters", {}),
+                        "time_hint": state.get("user_context", {}).get("time_hint"),
+                        "context": state.get("user_context", {})
+                    }
+                    
+                    result_state = agent.process(agent_state)
+                    
+                    # 상태 업데이트
+                    new_state = state.copy()
+                    new_state["agent_response"] = result_state.get("answer", "")
+                    new_state["agent_success"] = result_state.get("success", True)
+                    new_state["agent_type"] = agent.agent_type
+                    new_state["agent_metadata"] = result_state.get("metadata", {})
+                    
+                    return new_state
+                else:
+                    # 기존 async 패턴 사용 (호환성)
+                    response = await agent.process_async(user_input, user_id)
+                    
+                    # 상태 업데이트
+                    new_state = state.copy()
+                    new_state["agent_response"] = response.content
+                    new_state["agent_success"] = response.success
+                    new_state["agent_type"] = agent.agent_type
+                    new_state["agent_metadata"] = response.metadata or {}
+                    
+                    return new_state
+                    
             except Exception as e:
                 new_state = state.copy()
                 new_state["agent_response"] = f"에이전트 실행 중 오류: {str(e)}"

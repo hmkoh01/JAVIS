@@ -1,7 +1,9 @@
-from .models import Base, User, UserInteraction, UserAnalytics, KnowledgeBase
-from .connection import get_db_session, create_tables, engine
+from .sqlite_meta import SQLiteMeta
+from .qdrant_client import QdrantManager
+from .repository import Repository, Hit
+from .data_collector import FileCollector, BrowserHistoryCollector, ActiveApplicationCollector, ScreenActivityCollector
 
 __all__ = [
-    "Base", "User", "UserInteraction", "UserAnalytics", "KnowledgeBase",
-    "get_db_session", "create_tables", "engine"
+    "SQLiteMeta", "QdrantManager", "Repository", "Hit",
+    "FileCollector", "BrowserHistoryCollector", "ActiveApplicationCollector", "ScreenActivityCollector"
 ] 

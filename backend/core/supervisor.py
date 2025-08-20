@@ -262,46 +262,55 @@ JSON 응답만 제공해주세요:
             # 각 에이전트를 순차적으로 실행
             for i, agent_type in enumerate(selected_agents):
                 try:
-                    # 에이전트 노드 가져오기
-                    agent_node = agent_registry.get_agent_node(agent_type)
+                    # 에이전트 인스턴스 가져오기
+                    agent = agent_registry.get_agent(agent_type)
                     
-                    if agent_node:
-                        # 현재 에이전트용 상태 생성
+                    if agent:
+                        # 새로운 process(state) 패턴에 맞는 상태 생성
                         agent_state = {
-                            "messages": state.get("messages", []),
-                            "user_input": user_input,
+                            "question": user_input,
                             "user_id": user_id,
-                            "user_context": state.get("user_context", {}),
-                            "selected_agent": agent_type,  # 단일 에이전트용
-                            "reasoning": state.get("reasoning", ""),
-                            "agent_response": "",
-                            "agent_success": False,
-                            "agent_type": agent_type,
-                            "agent_metadata": {},
-                            "available_agents": state.get("available_agents", [])
+                            "session_id": state.get("user_context", {}).get("session_id"),
+                            "filters": state.get("user_context", {}).get("filters", {}),
+                            "time_hint": state.get("user_context", {}).get("time_hint"),
+                            "context": state.get("user_context", {})
                         }
                         
-                        # 에이전트 실행
-                        result_state = await agent_node(agent_state)
-                        
-                        # 응답 수집
-                        agent_response = {
-                            "agent_type": agent_type,
-                            "content": result_state.get("agent_response", ""),
-                            "success": result_state.get("agent_success", False),
-                            "metadata": result_state.get("agent_metadata", {}),
-                            "order": i + 1
-                        }
+                        # 새로운 process(state) 패턴으로 에이전트 실행
+                        if hasattr(agent, 'process') and callable(getattr(agent, 'process')):
+                            # 새로운 패턴 사용
+                            result_state = agent.process(agent_state)
+                            
+                            # 응답 수집
+                            agent_response = {
+                                "agent_type": agent_type,
+                                "content": result_state.get("answer", ""),
+                                "success": True,  # process()는 성공 시에만 호출됨
+                                "metadata": result_state.get("metadata", {}),
+                                "evidence": result_state.get("evidence", []),
+                                "order": i + 1
+                            }
+                        else:
+                            # 기존 async 패턴 사용 (호환성)
+                            result = await agent.process_async(user_input, user_id)
+                            agent_response = {
+                                "agent_type": agent_type,
+                                "content": result.content,
+                                "success": result.success,
+                                "metadata": result.metadata,
+                                "evidence": [],
+                                "order": i + 1
+                            }
                         
                         agent_responses.append(agent_response)
                         
                         # 첫 번째 에이전트를 주요 에이전트로 설정
                         if i == 0:
                             primary_agent_type = agent_type
-                            final_response = result_state.get("agent_response", "")
+                            final_response = agent_response["content"]
                         
                         # 에이전트 실행 실패 시 전체 실패로 처리
-                        if not result_state.get("agent_success", False):
+                        if not agent_response["success"]:
                             agent_success = False
                             
                     else:
@@ -311,6 +320,7 @@ JSON 응답만 제공해주세요:
                             "content": f"에이전트를 찾을 수 없습니다: {agent_type}",
                             "success": False,
                             "metadata": {},
+                            "evidence": [],
                             "order": i + 1
                         })
                         agent_success = False
@@ -322,6 +332,7 @@ JSON 응답만 제공해주세요:
                         "content": f"에이전트 실행 중 오류: {str(e)}",
                         "success": False,
                         "metadata": {"error": str(e)},
+                        "evidence": [],
                         "order": i + 1
                     })
                     agent_success = False

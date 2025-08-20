@@ -1,6 +1,20 @@
 # 🦜🕸️ JAVIS - LangGraph 기반 멀티 에이전트 시스템
 
-JAVIS는 LangGraph를 기반으로 한 지능형 멀티 에이전트 시스템입니다. ColQwen2, Milvus, Gemini API, Tavily Search를 활용한 멀티모달 RAG(Retrieval-Augmented Generation) 기능을 제공합니다.
+JAVIS는 LangGraph를 기반으로 한 지능형 멀티 에이전트 시스템입니다. ColQwen2, Qdrant, Gemini API, Tavily Search를 활용한 멀티모달 RAG(Retrieval-Augmented Generation) 기능을 제공합니다.
+
+## 🆕 로컬 멀티모달 RAG 시스템
+
+### 주요 특징
+- **ColQwen2 임베더**: 텍스트/이미지/스크린샷을 128D 공통 벡터 공간으로 임베딩
+- **Qdrant 벡터 DB**: 멀티벡터 저장 및 ANN 검색
+- **MonoVLM 재랭커**: MonoQwen2-VL-v0.1을 사용한 이미지 재랭킹
+- **Qwen2-VL VLM**: 4bit 양자화된 비전 언어 모델
+- **로컬 데이터 수집**: 파일/웹/앱/화면 활동 자동 수집
+
+### RAG 파이프라인
+```
+[사용자 질문] → [ColQwen2 임베딩] → [Qdrant 검색] → [MonoVLM 재랭킹] → [Qwen2-VL 응답] → [최종 답변]
+```
 
 ## 🚀 주요 기능
 
@@ -20,6 +34,12 @@ JAVIS는 LangGraph를 기반으로 한 지능형 멀티 에이전트 시스템�
 - **웹 기반 시각화**: LangGraph 워크플로우 실시간 시각화
 - **멀티모달 지원**: 텍스트, 이미지, 웹 검색 결과 통합
 
+### 📊 자동 데이터 수집 및 RAG 연동
+- **파일 수집**: 1시간마다 사용자 파일 시스템 스캔 및 RAG 인덱싱
+- **웹 히스토리**: 30분마다 브라우저 히스토리 수집 및 검색 가능
+- **앱 활동**: 5분마다 활성 애플리케이션 정보 수집
+- **화면 활동**: 1분마다 스크린샷 캡처 및 Gemini 분석 후 RAG 인덱싱
+
 ## 🏗️ 시스템 아키텍처
 
 ### LangGraph 워크플로우
@@ -35,17 +55,35 @@ JAVIS는 LangGraph를 기반으로 한 지능형 멀티 에이전트 시스템�
 [응답 반환]
 ```
 
+### RAG 시스템 구조
+```
+database/
+├── sqlite_meta.py      # SQLite 메타데이터 관리
+├── qdrant_client.py    # Qdrant 벡터 DB 클라이언트
+└── repository.py       # 통합 Repository API
+
+chatbot_agent/rag/
+├── models/
+│   └── colqwen2_embedder.py  # ColQwen2 임베더
+├── retrievers.py       # 검색 로직
+├── rerankers.py        # 재랭킹 로직
+├── answerer.py         # 응답 생성
+└── react_agent.py      # ReAct 에이전트 엔트리
+```
+
 ### 멀티모달 RAG 파이프라인
 ```
 [사용자 질문]
     ↓
-[Tavily Search] → 웹 검색 수행
+[ColQwen2 임베딩] → 질문을 128D 벡터로 변환
     ↓
-[Milvus 검색] → 관련 이미지 검색
+[Qdrant 검색] → text/image/screen 컬렉션에서 ANN 검색
     ↓
-[ColQwen2 분석] → 멀티모달 분석
+[MonoVLM 재랭킹] → 이미지 후보 재랭킹 (선택적)
     ↓
-[Gemini API] → 최종 응답 생성
+[Qwen2-VL 분석] → 멀티모달 응답 생성 (선택적)
+    ↓
+[응답 생성] → 근거 기반 텍스트 응답
     ↓
 [사용자에게 응답]
 ```
@@ -69,6 +107,24 @@ javis\Scripts\activate  # Windows
 ### 3. 의존성 설치
 ```bash
 pip install -r requirements.txt
+```
+
+#### RAG 시스템 의존성
+```bash
+# 핵심 의존성
+pip install torch transformers numpy Pillow PyYAML
+
+# 벡터 데이터베이스
+pip install qdrant-client
+
+# 임베딩 및 재랭킹
+pip install byaldi rerankers[monovlm]
+
+# VLM 의존성
+pip install qwen-vl-utils bitsandbytes
+
+# 데이터베이스
+pip install psutil
 ```
 
 ### 4. 환경 변수 설정
@@ -101,6 +157,44 @@ COLQWEN2_MODEL=qwen2.5-72b-instruct
 # 이미지 업로드 설정
 IMAGE_UPLOAD_PATH=./uploads/images
 MAX_IMAGE_SIZE_MB=10
+
+# Qdrant 설정
+QDRANT_URL=http://localhost:6333
+
+# RAG 설정
+EMBEDDING_DIM=128
+RETRIEVAL_K_CANDIDATES=40
+RETRIEVAL_K_FINAL=10
+VLM_ENABLED=true
+```
+
+### 5. RAG 설정 파일 (configs.yaml)
+프로젝트 루트에 `configs.yaml` 파일을 생성하세요:
+
+```yaml
+qdrant:
+  url: "http://localhost:6333"
+  collections:
+    text: "text_chunks"
+    image: "image_patches"
+    screen: "screens_patches"
+embedding:
+  dim: 128
+  batch_size: 32
+sqlite:
+  path: "./var/meta.db"
+retrieval:
+  k_candidates: 40
+  k_final: 10
+security:
+  redact_patterns:
+    - "(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}"
+    - "\\b01[016789]-?\\d{3,4}-?\\d{4}\\b"
+vlm:
+  enabled: true
+  model_name: "Qwen/Qwen2-VL-7B-Instruct"
+  quantization: true
+  max_new_tokens: 500
 ```
 
 ## 🚀 실행 방법
@@ -108,6 +202,22 @@ MAX_IMAGE_SIZE_MB=10
 ### 전체 시스템 시작
 ```bash
 python start.py
+```
+
+### RAG 시스템 테스트
+```bash
+python test_rag.py
+```
+
+### Qdrant 서버 시작
+```bash
+# Docker로 Qdrant 실행
+docker run -p 6333:6333 qdrant/qdrant
+
+# 또는 바이너리 다운로드
+wget https://github.com/qdrant/qdrant/releases/download/v1.7.0/qdrant-v1.7.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf qdrant-v1.7.0-x86_64-unknown-linux-gnu.tar.gz
+./qdrant
 ```
 
 ### 개별 컴포넌트 시작
@@ -162,26 +272,48 @@ GET /api/v2/graph/visualization
 GET /api/v2/health
 ```
 
+### RAG 시스템 API
+```bash
+# 로컬 RAG 질문 처리
+POST /api/v2/rag/query
+Content-Type: application/json
+
+{
+  "question": "지난주 내가 가장 오래 본 웹페이지는?",
+  "user_id": "user123",
+  "filters": {},
+  "time_hint": null
+}
+```
+
 ## 📊 자동 데이터 수집 시스템
 
 ### 개요
-JAVIS는 사용자의 디지털 활동을 자동으로 수집하고 분석하는 시스템을 포함합니다. 이 시스템은 사용자의 파일, 브라우저 히스토리, 활성 애플리케이션, 화면 활동을 지속적으로 모니터링하여 개인화된 AI 서비스를 제공합니다.
+JAVIS는 사용자의 디지털 활동을 자동으로 수집하고 RAG 시스템에 실시간으로 인덱싱하는 통합 시스템을 제공합니다. 수집된 모든 데이터는 즉시 검색 가능한 지식베이스가 되어, 사용자가 "내가 어디에 뭘 썼더라?" 같은 질문에도 정확한 답변을 받을 수 있습니다.
 
-### 수집되는 데이터
+### 수집 및 인덱싱 과정
 
-#### 1. 파일 시스템 스캔
+#### 1. 파일 시스템 스캔 및 RAG 인덱싱
 - **수집 주기**: 1시간마다
 - **수집 범위**: 사용자 드라이브의 모든 파일
 - **제외 디렉토리**: Windows, Program Files, 시스템 폴더 등
+- **RAG 인덱싱**: 
+  - 텍스트 파일: 내용 추출 → 청킹 → ColQwen2 벡터화 → Qdrant 저장
+  - 이미지 파일: PIL 로드 → 패치 분할 → ColQwen2 벡터화 → Qdrant 저장
+  - 문서 파일: PyPDF2/python-docx로 텍스트 추출 → 벡터화 → 저장
 - **수집 정보**:
   - 파일 경로, 이름, 크기, 타입
   - 생성/수정/접근 시간
   - 파일 카테고리 (문서, 이미지, 비디오, 코드 등)
   - 텍스트 파일의 경우 내용 미리보기
 
-#### 2. 브라우저 히스토리 수집
+#### 2. 브라우저 히스토리 수집 및 RAG 인덱싱
 - **수집 주기**: 30분마다
 - **지원 브라우저**: Chrome, Firefox, Edge
+- **RAG 인덱싱**: 
+  - URL/제목/방문시간을 텍스트로 변환
+  - ColQwen2로 벡터화 → Qdrant 저장
+  - 도메인별 분류 및 메타데이터 저장
 - **수집 정보**:
   - 방문한 URL과 제목
   - 방문 횟수와 시간
@@ -199,6 +331,10 @@ JAVIS는 사용자의 디지털 활동을 자동으로 수집하고 분석하는
 #### 4. 화면 활동 분석 (LLM 기반)
 - **수집 주기**: 1분마다
 - **분석 방식**: Gemini API를 사용한 스크린샷 분석
+- **RAG 인덱싱**:
+  - 스크린샷 이미지를 ColQwen2로 벡터화
+  - Gemini 분석 결과를 텍스트로 벡터화
+  - 앱 이름, 활동 설명, 감지된 텍스트를 메타데이터로 저장
 - **수집 정보**:
   - 사용자 활동 설명
   - 활동 카테고리 (작업, 브라우징, 엔터테인먼트 등)
@@ -233,12 +369,43 @@ GET /api/v2/data-collection/status
 GET /api/v2/data-collection/stats
 ```
 
+### RAG 데이터 인덱싱
+```bash
+# 파일 인덱싱
+POST /api/v2/rag/index/file
+Content-Type: application/json
+
+{
+  "doc_id": "file_123",
+  "path": "/path/to/file.pdf",
+  "vectors": [[0.1, 0.2, ...]],
+  "metas": [{"page": 1, "snippet": "..."}]
+}
+
+# 스크린샷 인덱싱
+POST /api/v2/rag/index/screenshot
+Content-Type: application/json
+
+{
+  "doc_id": "screen_123",
+  "path": "/path/to/screenshot.png",
+  "vectors": [[0.1, 0.2, ...]],
+  "metas": [{"bbox": [0, 0, 100, 100], "app_name": "chrome"}]
+}
+```
+
 ### 보안 및 개인정보 보호
 
 #### 데이터 보호
 - 모든 데이터는 로컬 데이터베이스에만 저장
 - 외부 전송 없음
 - 사용자 동의 기반 수집
+
+#### RAG 시스템 보안
+- 민감 정보 정규식 마스킹 (이메일, 전화번호 등)
+- 로컬 벡터 DB로 데이터 외부 전송 방지
+- 사용자별 데이터 필터링
+- 응답 생성 시 보안 패턴 적용
 
 #### 수집 제어
 - 언제든지 수집 중지 가능
@@ -250,6 +417,18 @@ GET /api/v2/data-collection/stats
 #### 필수 패키지
 ```bash
 pip install psutil pywin32 pillow google-generativeai
+```
+
+#### RAG 시스템 요구사항
+```bash
+# GPU 메모리: 최소 8GB (VLM 사용 시 16GB 권장)
+# CPU: 4코어 이상
+# RAM: 16GB 이상
+# 저장공간: 10GB 이상 (모델 및 데이터)
+
+# 필수 패키지
+pip install torch transformers qdrant-client byaldi rerankers[monovlm]
+pip install qwen-vl-utils bitsandbytes pillow numpy pyyaml
 ```
 
 #### 권한 요구사항
@@ -273,6 +452,23 @@ start_user_data_collection(user_id=1)
 stop_user_data_collection(user_id=1)
 ```
 
+#### RAG 시스템 사용
+```python
+from agents.chatbot_agent.rag.react_agent import process
+
+# 질문 처리
+state = {
+    "question": "지난주 내가 가장 오래 본 웹페이지는?",
+    "user_id": "user123",
+    "filters": {},
+    "time_hint": None
+}
+
+result = process(state)
+print(result["answer"])
+print(f"찾은 근거: {len(result['evidence'])}개")
+```
+
 ### 성능 최적화
 
 #### 메모리 사용량
@@ -285,27 +481,85 @@ stop_user_data_collection(user_id=1)
 - 수집 주기 조정 가능
 - 백그라운드 스레드 사용
 
+### RAG 시스템 성능 최적화
+
+#### 메모리 최적화
+- ColQwen2 모델 캐싱 및 싱글톤 패턴
+- 배치 처리로 GPU 메모리 효율적 사용
+- 4bit 양자화로 VLM 메모리 사용량 감소
+
+#### 검색 성능
+- Qdrant HNSW 인덱스로 빠른 ANN 검색
+- 컬렉션별 병렬 검색
+- MaxSim 점수 계산 최적화
+
+#### 응답 생성
+- MonoVLM 재랭킹은 이미지가 있는 경우만 수행
+- VLM 호출은 설정으로 on/off 가능
+- 근거 기반 텍스트 응답으로 빠른 응답
+
 ## 🤖 등록된 에이전트
+
+모든 에이전트는 통일된 `process(state) -> state` 패턴을 따릅니다:
 
 ### 1. Multimodal Chatbot Agent
 - **기능**: 멀티모달 RAG 기반 대화
-- **도구**: ColQwen2, Milvus, Gemini API, Tavily Search
+- **도구**: ColQwen2, Qdrant, Gemini API, Tavily Search
 - **사용법**: 일반적인 질문이나 이미지 관련 질문
+- **패턴**: `process(state) -> state`
 
-### 2. Coding Agent
+### 2. Local RAG Agent
+- **기능**: 로컬 데이터 기반 RAG 질의응답
+- **도구**: ColQwen2, Qdrant, MonoVLM, Qwen2-VL
+- **사용법**: "지난주 내가 가장 오래 본 웹페이지는?", "최근에 작업한 문서는?" 등
+- **패턴**: `process(state) -> state`
+
+### 3. Coding Agent
 - **기능**: 코드 생성, 디버깅, 리팩토링
 - **도구**: 코드 분석 도구, 디버거
 - **사용법**: "코드를 작성해줘", "버그를 찾아줘" 등
+- **패턴**: `process(state) -> state`
 
-### 3. Dashboard Agent
+### 4. Dashboard Agent
 - **기능**: 데이터 시각화, 차트 생성
 - **도구**: 차트 라이브러리, 데이터 분석 도구
 - **사용법**: "차트를 만들어줘", "데이터를 분석해줘" 등
+- **패턴**: `process(state) -> state`
 
-### 4. Recommendation Agent
+### 5. Recommendation Agent
 - **기능**: 개인화된 추천
 - **도구**: 추천 알고리즘, 사용자 프로필 분석
 - **사용법**: "추천해줘", "추천해주세요" 등
+- **패턴**: `process(state) -> state`
+
+### 에이전트 사용 예시
+
+```python
+from backend.agents.chatbot_agent import process as chatbot_process
+from backend.agents.coding_agent import CodingAgent
+from backend.agents.dashboard_agent import DashboardAgent
+from backend.agents.recommendation_agent import RecommendationAgent
+
+# 상태 정의
+state = {
+    "question": "파이썬으로 간단한 계산기 만들기",
+    "user_id": "user123",
+    "session_id": "session456"
+}
+
+# RAG 에이전트 사용
+result = chatbot_process(state)
+
+# 다른 에이전트들 사용
+coding_agent = CodingAgent()
+result = coding_agent.process(state)
+
+dashboard_agent = DashboardAgent()
+result = dashboard_agent.process(state)
+
+recommendation_agent = RecommendationAgent()
+result = recommendation_agent.process(state)
+```
 
 ## 🧠 LLM 기반 지능형 선택 시스템
 
@@ -338,6 +592,7 @@ stop_user_data_collection(user_id=1)
 
 ## 🔄 워크플로우 처리 과정
 
+### 일반 워크플로우
 1. **사용자 입력 수신**: 프론트엔드에서 사용자 메시지 전송
 2. **LLM 의도 분석**: Gemini API를 사용하여 사용자 의도 분석
 3. **에이전트 선택**: LLM 분석 결과를 바탕으로 적절한 에이전트 선택
@@ -346,14 +601,40 @@ stop_user_data_collection(user_id=1)
 6. **응답 생성**: 도구 실행 결과를 바탕으로 최종 응답 생성
 7. **사용자에게 전달**: 프론트엔드로 응답 전송
 
+### RAG 워크플로우
+1. **질문 수신**: 사용자 질문 입력
+2. **ColQwen2 임베딩**: 질문을 128D 벡터로 변환
+3. **Qdrant 검색**: text/image/screen 컬렉션에서 ANN 검색
+4. **후보 통합**: 각 소스에서 검색된 후보들을 통합
+5. **MonoVLM 재랭킹**: 이미지가 있는 경우 재랭킹 수행
+6. **Qwen2-VL 분석**: 이미지가 있는 경우 VLM 응답 생성
+7. **응답 생성**: 근거 기반 텍스트 응답 또는 VLM 응답
+8. **결과 반환**: 사용자에게 최종 응답 전달
+
 ## 🎯 사용 예시
+
+### 로컬 RAG 질문
+```python
+from agents.chatbot_agent.rag.react_agent import process
+
+# 질문 처리
+state = {
+    "question": "지난주 내가 가장 오래 본 웹페이지는?",
+    "user_id": "user123",
+    "filters": {},
+    "time_hint": None
+}
+
+result = process(state)
+print(result["answer"])
+```
 
 ### 멀티모달 질문
 ```
 사용자: "이 이미지에서 무엇을 볼 수 있나요?"
 시스템: 
 1. Tavily Search로 관련 정보 검색
-2. Milvus에서 유사한 이미지 검색
+2. Qdrant에서 유사한 이미지 검색
 3. ColQwen2로 멀티모달 분석
 4. Gemini API로 최종 응답 생성
 ```
@@ -379,9 +660,21 @@ stop_user_data_collection(user_id=1)
 2. `BaseTool`를 상속받아 구현
 3. 에이전트에 도구 등록
 
+### RAG 시스템 확장
+1. **새로운 임베더 추가**: `rag/models/` 디렉토리에 새 임베더 클래스 구현
+2. **새로운 재랭커 추가**: `rag/rerankers.py`에 새 재랭킹 함수 추가
+3. **새로운 VLM 추가**: `rag/answerer.py`에 새 VLM 호출 함수 추가
+4. **새로운 데이터 소스 추가**: `database/` 디렉토리에 새 메타데이터 관리자 추가
+
 ## 📝 라이선스
 
 이 프로젝트는 MIT 라이선스 하에 배포됩니다.
+
+### 사용된 모델 라이선스
+- **ColQwen2**: Apache 2.0 License
+- **Qwen2-VL**: Tongyi Qianwen License
+- **MonoQwen2-VL**: Apache 2.0 License
+- **Byaldi**: MIT License
 
 ## 🤝 기여하기
 
@@ -391,10 +684,161 @@ stop_user_data_collection(user_id=1)
 4. Push to the branch
 5. Create a Pull Request
 
+## 🔧 트러블슈팅
+
+### RAG 시스템 문제 해결
+
+#### Qdrant 연결 오류
+```bash
+# Qdrant 서버 상태 확인
+curl http://localhost:6333/collections
+
+# Docker로 재시작
+docker stop qdrant
+docker run -p 6333:6333 qdrant/qdrant
+```
+
+#### 모델 로드 오류
+```bash
+# CUDA 사용 가능 여부 확인
+python -c "import torch; print(torch.cuda.is_available())"
+
+# CPU 모드로 강제 실행
+export CUDA_VISIBLE_DEVICES=""
+```
+
+#### 메모리 부족 오류
+```bash
+# VLM 비활성화
+# configs.yaml에서 vlm.enabled: false로 설정
+
+# 배치 크기 줄이기
+# configs.yaml에서 embedding.batch_size: 16으로 설정
+```
+
 ## 📞 지원
 
 문제가 있거나 질문이 있으시면 이슈를 생성해주세요.
 
 ---
 
-**JAVIS** - Just A Very Intelligent System 🚀 
+**JAVIS** - Just A Very Intelligent System 🚀
+
+---
+
+## 🎉 RAG 시스템 구현 완료
+
+### 추가/변경된 파일 목록
+```
+configs.yaml                           # 설정 파일
+backend/database/
+├── sqlite_meta.py                     # SQLite 메타데이터 관리
+├── qdrant_client.py                   # Qdrant 벡터 DB 클라이언트
+└── repository.py                      # 통합 Repository API
+
+backend/agents/chatbot_agent/rag/
+├── __init__.py                        # RAG 패키지 초기화
+├── models/
+│   ├── __init__.py                    # 모델 패키지 초기화
+│   └── colqwen2_embedder.py           # ColQwen2 임베더
+├── retrievers.py                      # 검색 로직
+├── rerankers.py                       # 재랭킹 로직
+├── answerer.py                        # 응답 생성
+└── react_agent.py                     # ReAct 에이전트 엔트리
+
+test_rag.py                           # RAG 시스템 테스트
+requirements.txt                      # 의존성 목록
+```
+
+### 간단 실행 예제
+```python
+from agents.chatbot_agent.rag.react_agent import process
+
+# 질문 처리
+result = process({
+    "question": "지난주 내가 가장 오래 본 웹페이지는?",
+    "user_id": "user123"
+})
+
+print(result["answer"])
+```
+
+## 🔄 최근 업데이트 (2025년 1월)
+
+### 에이전트 통일 패턴 적용
+- 모든 에이전트가 `process(state) -> state` 패턴으로 통일
+- 기존 async 메서드는 `process_async()`로 유지하여 호환성 보장
+- 상태 기반 처리로 더 일관된 에이전트 인터페이스 제공
+
+### 제거된 파일들
+- **Alembic 관련 파일들**: 기존 DB 마이그레이션 도구 제거
+  - `alembic/` 디렉토리 전체
+  - `alembic.ini`
+  - `alembic/env.py`
+  - `alembic/script.py.mako`
+  - `alembic/versions/25fb98aeebd6_add_user_data_collection_models.py`
+
+### 수정된 파일들
+- `backend/agents/coding_agent/coding_agent.py` - process(state) 패턴 추가
+- `backend/agents/dashboard_agent/dashboard_agent.py` - process(state) 패턴 추가  
+- `backend/agents/recommendation_agent/recommendation_agent.py` - process(state) 패턴 추가
+- `backend/agents/__init__.py` - 새로운 process 함수들 export
+- `README.md` - 에이전트 사용 예시 및 패턴 설명 추가
+
+### 테스트
+```python
+# 모든 에이전트 테스트
+python test_agents.py
+
+# Data Collector와 RAG 연동 테스트
+python test_data_collector_rag.py
+```
+
+## 🆕 Data Collector와 RAG 시스템 연동 완료
+
+### 주요 변경사항
+- **FileCollector**: 파일 수집 시 자동으로 RAG 시스템에 인덱싱
+- **BrowserHistoryCollector**: 웹 히스토리 수집 시 RAG 인덱싱
+- **ScreenActivityCollector**: 스크린샷 분석 결과를 RAG에 인덱싱
+- **통합 인덱싱**: 모든 수집된 데이터가 즉시 검색 가능
+
+### 지원하는 파일 타입
+- **텍스트 파일**: .txt, .py, .js, .html, .css, .md, .json, .xml, .csv
+- **문서 파일**: .pdf (PyPDF2), .docx, .doc (python-docx)
+- **스프레드시트**: .xlsx, .xls (pandas)
+- **이미지 파일**: .jpg, .jpeg, .png, .gif, .bmp, .tiff, .webp
+
+### 연동 동작 과정
+1. **파일 수집** (1시간마다)
+   - 파일 시스템 스캔 → 내용 추출 → 청킹 → 벡터화 → Qdrant 저장
+2. **웹 히스토리** (30분마다)
+   - 브라우저 히스토리 수집 → 텍스트 변환 → 벡터화 → 저장
+3. **화면 활동** (1분마다)
+   - 스크린샷 캡처 → Gemini 분석 → 이미지/텍스트 벡터화 → 저장
+
+### 사용 예시
+```python
+# 파일이 자동으로 인덱싱된 후 검색 가능
+result = process({
+    "question": "내가 작성한 매출 보고서에서 1분기 실적은?",
+    "user_id": "user123"
+})
+
+# 웹 히스토리 검색
+result = process({
+    "question": "지난주에 가장 많이 방문한 웹사이트는?",
+    "user_id": "user123"
+})
+
+# 화면 활동 검색
+result = process({
+    "question": "오늘 오후에 어떤 앱을 사용했어?",
+    "user_id": "user123"
+})
+```
+
+### 추가된 의존성
+- PyPDF2>=3.0.0 (PDF 파일 처리)
+- python-docx>=0.8.11 (Word 문서 처리)
+- pandas>=2.0.0 (Excel 파일 처리)
+- openpyxl>=3.1.0 (Excel 파일 지원) 

@@ -16,19 +16,21 @@ import winreg
 import subprocess
 import numpy as np
 import hashlib
+from PIL import ImageGrab
 
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
-from .models import User, UserFile, BrowserHistory, ActiveApplication, ScreenActivity
-from .connection import get_db_session
 from config.settings import settings
+
+# RAG 시스템 연동을 위한 import
+from .repository import Repository
+from .sqlite_meta import SQLiteMeta
+from agents.chatbot_agent.rag.models.colqwen2_embedder import ColQwen2Embedder
 
 class FileCollector:
     """사용자 드라이브의 파일들을 수집하는 클래스"""
     
     def __init__(self, user_id: int):
         self.user_id = user_id
-        self.db_session = get_db_session()
+        self.sqlite_meta = SQLiteMeta()
         self.supported_extensions = {
             'document': ['.txt', '.doc', '.docx', '.pdf', '.rtf', '.odt'],
             'spreadsheet': ['.xls', '.xlsx', '.csv', '.ods'],
@@ -102,49 +104,202 @@ class FileCollector:
         return collected_files
     
     def save_files_to_db(self, files: List[Dict[str, Any]]) -> int:
-        """수집된 파일들을 데이터베이스에 저장합니다."""
+        """수집된 파일들을 데이터베이스에 저장하고 RAG 시스템에 인덱싱합니다."""
         saved_count = 0
+        
+        # RAG 시스템 초기화
+        try:
+            repo = Repository()
+            embedder = ColQwen2Embedder.load()
+        except Exception as e:
+            print(f"RAG 시스템 초기화 오류: {e}")
+            repo = None
+            embedder = None
         
         for file_info in files:
             try:
-                # 중복 체크
-                existing_file = self.db_session.query(UserFile).filter(
-                    and_(
-                        UserFile.user_id == self.user_id,
-                        UserFile.file_path == file_info['file_path']
-                    )
-                ).first()
+                # 1. SQLite에 저장
+                success = self.sqlite_meta.insert_collected_file(file_info)
                 
-                if existing_file:
-                    # 기존 파일 정보 업데이트
-                    existing_file.modified_date = file_info['modified_date']
-                    existing_file.accessed_date = file_info['accessed_date']
-                    existing_file.file_size = file_info['file_size']
-                else:
-                    # 새 파일 추가
-                    new_file = UserFile(**file_info)
-                    self.db_session.add(new_file)
-                
-                saved_count += 1
+                if success:
+                    # 2. RAG 시스템에 인덱싱
+                    if repo and embedder:
+                        self._index_file_for_rag(file_info, repo, embedder)
+                    
+                    saved_count += 1
                 
             except Exception as e:
                 print(f"파일 저장 오류 {file_info['file_path']}: {e}")
                 continue
-        
-        try:
-            self.db_session.commit()
-        except Exception as e:
-            print(f"데이터베이스 커밋 오류: {e}")
-            self.db_session.rollback()
             
         return saved_count
+
+    def _index_file_for_rag(self, file_info: Dict[str, Any], repo: Repository, embedder: ColQwen2Embedder):
+        """파일을 RAG 시스템에 인덱싱"""
+        try:
+            file_path = file_info['file_path']
+            file_category = file_info['file_category']
+            
+            # 1. SQLite 메타데이터에 저장
+            doc_id = f"file_{hash(file_path)}"
+            repo.sqlite.upsert_file(
+                doc_id=doc_id,
+                path=file_path,
+                mime=self._get_mime_type(file_path),
+                size=file_info['file_size'],
+                created_at=int(file_info['created_date'].timestamp()),
+                updated_at=int(file_info['modified_date'].timestamp()),
+                accessed_at=int(file_info['accessed_date'].timestamp()),
+                category=file_category,
+                preview=self._get_file_preview(file_path)
+            )
+            
+            # 2. 파일 타입에 따른 벡터화 및 인덱싱
+            if file_category in ['document', 'spreadsheet', 'presentation', 'code']:
+                # 텍스트 파일 처리
+                self._index_text_file(file_path, doc_id, repo, embedder)
+            elif file_category == 'image':
+                # 이미지 파일 처리
+                self._index_image_file(file_path, doc_id, repo, embedder)
+                
+        except Exception as e:
+            print(f"RAG 인덱싱 오류 {file_path}: {e}")
+
+    def _index_text_file(self, file_path: str, doc_id: str, repo: Repository, embedder: ColQwen2Embedder):
+        """텍스트 파일을 RAG 시스템에 인덱싱"""
+        try:
+            # 파일 내용 읽기
+            content = self._extract_text_content(file_path)
+            if not content:
+                return
+            
+            # 텍스트 청킹
+            chunks = self._chunk_text(content, chunk_size=1000)
+            
+            for i, chunk in enumerate(chunks):
+                # 텍스트 임베딩 생성
+                vectors = embedder.encode_text(chunk)
+                
+                # 메타데이터 생성
+                meta = {
+                    'page': i + 1,
+                    'snippet': chunk[:200] + "..." if len(chunk) > 200 else chunk,
+                    'path': file_path
+                }
+                
+                # Qdrant에 인덱싱
+                repo.index_text_chunks(doc_id, vectors, [meta])
+                
+        except Exception as e:
+            print(f"텍스트 파일 인덱싱 오류 {file_path}: {e}")
+
+    def _index_image_file(self, file_path: str, doc_id: str, repo: Repository, embedder: ColQwen2Embedder):
+        """이미지 파일을 RAG 시스템에 인덱싱"""
+        try:
+            from PIL import Image
+            
+            # 이미지 로드
+            image = Image.open(file_path)
+            
+            # 이미지 임베딩 생성
+            vectors = embedder.encode_image_patches(image)
+            
+            # 메타데이터 생성
+            meta = {
+                'bbox': [0, 0, image.width, image.height],
+                'path': file_path,
+                'image_size': f"{image.width}x{image.height}"
+            }
+            
+            # Qdrant에 인덱싱
+            repo.index_image_patches(doc_id, vectors, [meta])
+            
+        except Exception as e:
+            print(f"이미지 파일 인덱싱 오류 {file_path}: {e}")
+
+    def _extract_text_content(self, file_path: str) -> str:
+        """파일에서 텍스트 내용을 추출"""
+        try:
+            ext = Path(file_path).suffix.lower()
+            
+            # 텍스트 파일 직접 읽기
+            if ext in ['.txt', '.py', '.js', '.html', '.css', '.md', '.json', '.xml', '.csv']:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    return f.read()
+            
+            # PDF 파일 처리
+            elif ext == '.pdf':
+                try:
+                    import PyPDF2
+                    with open(file_path, 'rb') as f:
+                        pdf_reader = PyPDF2.PdfReader(f)
+                        text = ""
+                        for page in pdf_reader.pages:
+                            text += page.extract_text() + "\n"
+                        return text
+                except ImportError:
+                    print("PyPDF2가 설치되지 않았습니다. PDF 파일을 건너뜁니다.")
+                    return ""
+            
+            # Word 문서 처리
+            elif ext in ['.docx', '.doc']:
+                try:
+                    from docx import Document
+                    doc = Document(file_path)
+                    text = ""
+                    for paragraph in doc.paragraphs:
+                        text += paragraph.text + "\n"
+                    return text
+                except ImportError:
+                    print("python-docx가 설치되지 않았습니다. Word 파일을 건너뜁니다.")
+                    return ""
+            
+            # Excel 파일 처리
+            elif ext in ['.xlsx', '.xls']:
+                try:
+                    import pandas as pd
+                    df = pd.read_excel(file_path)
+                    return df.to_string()
+                except ImportError:
+                    print("pandas가 설치되지 않았습니다. Excel 파일을 건너뜁니다.")
+                    return ""
+            
+            return ""
+            
+        except Exception as e:
+            print(f"텍스트 추출 오류 {file_path}: {e}")
+            return ""
+
+    def _chunk_text(self, text: str, chunk_size: int = 1000) -> List[str]:
+        """텍스트를 청크로 분할"""
+        chunks = []
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i:i + chunk_size]
+            if chunk.strip():
+                chunks.append(chunk)
+        return chunks
+
+    def _get_mime_type(self, file_path: str) -> str:
+        """파일의 MIME 타입을 반환"""
+        import mimetypes
+        return mimetypes.guess_type(file_path)[0] or 'application/octet-stream'
+
+    def _get_file_preview(self, file_path: str) -> str:
+        """파일 내용 미리보기 생성"""
+        try:
+            content = self._extract_text_content(file_path)
+            if content:
+                return content[:500] + "..." if len(content) > 500 else content
+        except:
+            pass
+        return ""
 
 class BrowserHistoryCollector:
     """브라우저 사용 기록을 수집하는 클래스"""
     
     def __init__(self, user_id: int):
         self.user_id = user_id
-        self.db_session = get_db_session()
+        self.sqlite_meta = SQLiteMeta()
         self.browser_paths = {
             'chrome': {
                 'path': os.path.expanduser('~\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\History'),
@@ -307,43 +462,94 @@ class BrowserHistoryCollector:
         return all_history
     
     def save_browser_history_to_db(self, history_data: List[Dict[str, Any]]) -> int:
-        """브라우저 히스토리를 데이터베이스에 저장합니다."""
+        """브라우저 히스토리를 데이터베이스에 저장하고 RAG 시스템에 인덱싱합니다."""
         saved_count = 0
+        
+        # RAG 시스템 초기화
+        try:
+            repo = Repository()
+            embedder = ColQwen2Embedder.load()
+        except Exception as e:
+            print(f"RAG 시스템 초기화 오류: {e}")
+            repo = None
+            embedder = None
         
         for history_item in history_data:
             try:
-                # 중복 체크 (URL과 방문 시간 기준)
-                existing_history = self.db_session.query(BrowserHistory).filter(
-                    and_(
-                        BrowserHistory.user_id == self.user_id,
-                        BrowserHistory.url == history_item['url'],
-                        BrowserHistory.visit_time == history_item['visit_time']
-                    )
-                ).first()
+                # 1. SQLite에 저장
+                success = self.sqlite_meta.insert_collected_browser_history(history_item)
                 
-                if not existing_history:
-                    new_history = BrowserHistory(**history_item)
-                    self.db_session.add(new_history)
+                if success:
                     saved_count += 1
-                
+                    
+                    # 2. RAG 시스템에 인덱싱
+                    if repo and embedder:
+                        self._index_web_history_for_rag(history_item, repo, embedder)
+                        
             except Exception as e:
                 print(f"브라우저 히스토리 저장 오류: {e}")
                 continue
-        
-        try:
-            self.db_session.commit()
-        except Exception as e:
-            print(f"데이터베이스 커밋 오류: {e}")
-            self.db_session.rollback()
             
         return saved_count
+
+    def _index_web_history_for_rag(self, history_item: Dict[str, Any], repo: Repository, embedder: ColQwen2Embedder):
+        """웹 히스토리를 RAG 시스템에 인덱싱"""
+        try:
+            url = history_item['url']
+            title = history_item['title']
+            visit_time = history_item['visit_time']
+            
+            # 1. SQLite 메타데이터에 저장
+            doc_id = f"web_{hash(url + str(visit_time))}"
+            repo.sqlite.insert_web_history(
+                url=url,
+                title=title,
+                visited_at=int(visit_time.timestamp()),
+                visit_count=history_item.get('visit_count', 1),
+                transition=history_item.get('page_transition', 'link'),
+                browser=history_item.get('browser_name', 'Unknown'),
+                version=history_item.get('browser_version', 'Unknown'),
+                domain=self._extract_domain(url),
+                duration_sec=0,  # 기본값
+                tab_title=title
+            )
+            
+            # 2. 웹 페이지 내용을 텍스트로 변환하여 벡터화
+            content = f"제목: {title}\nURL: {url}\n방문 시간: {visit_time}"
+            
+            # 텍스트 임베딩 생성
+            vectors = embedder.encode_text(content)
+            
+            # 메타데이터 생성
+            meta = {
+                'url': url,
+                'title': title,
+                'visit_time': int(visit_time.timestamp()),
+                'browser': history_item.get('browser_name', 'Unknown'),
+                'domain': self._extract_domain(url)
+            }
+            
+            # Qdrant에 인덱싱
+            repo.index_text_chunks(doc_id, vectors, [meta])
+            
+        except Exception as e:
+            print(f"웹 히스토리 RAG 인덱싱 오류: {e}")
+
+    def _extract_domain(self, url: str) -> str:
+        """URL에서 도메인을 추출"""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            return parsed.netloc
+        except:
+            return "unknown"
 
 class ActiveApplicationCollector:
     """실행 중인 애플리케이션 정보를 수집하는 클래스"""
     
     def __init__(self, user_id: int):
         self.user_id = user_id
-        self.db_session = get_db_session()
+        self.sqlite_meta = SQLiteMeta()  # 변경됨: self.db_session = get_db_session() -> self.sqlite_meta = SQLiteMeta()
         self.app_categories = {
             'productivity': ['word', 'excel', 'powerpoint', 'outlook', 'notepad', 'wordpad'],
             'development': ['code', 'pycharm', 'intellij', 'eclipse', 'visual studio', 'sublime'],
@@ -414,29 +620,13 @@ class ActiveApplicationCollector:
         
         for app_data in apps_data:
             try:
-                # 중복 체크 (같은 시간에 같은 앱이 이미 기록되어 있는지)
-                existing_app = self.db_session.query(ActiveApplication).filter(
-                    and_(
-                        ActiveApplication.user_id == self.user_id,
-                        ActiveApplication.app_name == app_data['app_name'],
-                        ActiveApplication.recorded_at >= datetime.utcnow() - timedelta(minutes=1)
-                    )
-                ).first()
-                
-                if not existing_app:
-                    new_app = ActiveApplication(**app_data)
-                    self.db_session.add(new_app)
+                # SQLite를 사용하여 저장
+                if self.sqlite_meta.insert_collected_app(app_data):
                     saved_count += 1
                 
             except Exception as e:
                 print(f"활성 애플리케이션 저장 오류: {e}")
                 continue
-        
-        try:
-            self.db_session.commit()
-        except Exception as e:
-            print(f"데이터베이스 커밋 오류: {e}")
-            self.db_session.rollback()
             
         return saved_count
 
@@ -445,7 +635,7 @@ class ScreenActivityCollector:
     
     def __init__(self, user_id: int):
         self.user_id = user_id
-        self.db_session = get_db_session()
+        self.sqlite_meta = SQLiteMeta()
         self.screenshot_dir = Path("uploads/screenshots")
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         
@@ -471,12 +661,12 @@ class ScreenActivityCollector:
             # 스크린샷 캡처
             screenshot = ImageGrab.grab()
             
-            # 파일명 생성
+            # 파일명 생성 (예: screenshot_1_20241201_143022.png)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"screenshot_{self.user_id}_{timestamp}.png"
             file_path = self.screenshot_dir / filename
             
-            # 이미지 저장
+            # 이미지를 uploads/screenshots/ 디렉토리에 저장
             screenshot.save(file_path, 'PNG')
             
             # 바이너리 데이터 읽기
@@ -550,37 +740,86 @@ JSON 응답만 제공해주세요:
     
     def save_screen_activity_to_db(self, screenshot_data: bytes, file_path: str, 
                                  analysis: Dict[str, Any]) -> bool:
-        """화면 활동 정보를 데이터베이스에 저장합니다."""
+        """화면 활동 정보를 데이터베이스에 저장하고 RAG 시스템에 인덱싱합니다."""
         try:
             # 화면 해상도 가져오기
             screen = ImageGrab.grab()
             resolution = f"{screen.width}x{screen.height}"
             
-            screen_activity = ScreenActivity(
-                user_id=self.user_id,
-                screenshot_path=file_path,
-                screenshot_data=screenshot_data,
-                activity_description=analysis.get('activity_description', ''),
-                activity_category=analysis.get('activity_category', ''),
-                activity_confidence=analysis.get('activity_confidence', 0.0),
-                detected_apps=analysis.get('detected_apps', []),
-                detected_text=analysis.get('detected_text', []),
-                detected_objects=analysis.get('detected_objects', []),
-                screen_resolution=resolution,
-                color_mode='light',  # 기본값
-                captured_at=datetime.utcnow(),
-                analyzed_at=datetime.utcnow()
-            )
+            # SQLite에 저장
+            screenshot_info = {
+                'user_id': self.user_id,
+                'screenshot_path': file_path,
+                'screenshot_data': screenshot_data,
+                'activity_description': analysis.get('activity_description', ''),
+                'activity_category': analysis.get('activity_category', ''),
+                'activity_confidence': analysis.get('activity_confidence', 0.0),
+                'detected_apps': analysis.get('detected_apps', []),
+                'detected_text': analysis.get('detected_text', []),
+                'detected_objects': analysis.get('detected_objects', []),
+                'screen_resolution': resolution,
+                'color_mode': 'light'
+            }
             
-            self.db_session.add(screen_activity)
-            self.db_session.commit()
+            success = self.sqlite_meta.insert_collected_screenshot(screenshot_info)
             
-            return True
+            if success:
+                # RAG 시스템에 인덱싱
+                self._index_screen_activity_for_rag(screenshot_data, file_path, analysis)
+            
+            return success
             
         except Exception as e:
             print(f"화면 활동 저장 오류: {e}")
-            self.db_session.rollback()
             return False
+
+    def _index_screen_activity_for_rag(self, screenshot_data: bytes, file_path: str, analysis: Dict[str, Any]):
+        """화면 활동을 RAG 시스템에 인덱싱"""
+        try:
+            # RAG 시스템 초기화
+            repo = Repository()
+            embedder = ColQwen2Embedder.load()
+            
+            # 1. SQLite 메타데이터에 저장
+            doc_id = f"screen_{hash(file_path)}"
+            repo.sqlite.insert_screenshot(
+                doc_id=doc_id,
+                path=file_path,
+                captured_at=int(datetime.utcnow().timestamp()),
+                app_name=analysis.get('detected_apps', ['Unknown'])[0] if analysis.get('detected_apps') else 'Unknown',
+                window_title=analysis.get('activity_description', ''),
+                hash=hashlib.md5(screenshot_data).hexdigest(),
+                ocr="",  # OCR 결과가 있다면 여기에 추가
+                gemini_desc=analysis.get('activity_description', ''),
+                category=analysis.get('activity_category', 'unknown'),
+                confidence=analysis.get('activity_confidence', 0.0)
+            )
+            
+            # 2. 스크린샷 이미지 벡터화
+            from PIL import Image
+            import io
+            
+            # 바이너리 데이터를 PIL Image로 변환
+            image = Image.open(io.BytesIO(screenshot_data))
+            
+            # 이미지 임베딩 생성
+            vectors = embedder.encode_image_patches(image)
+            
+            # 메타데이터 생성
+            meta = {
+                'bbox': [0, 0, image.width, image.height],
+                'path': file_path,
+                'app_name': analysis.get('detected_apps', ['Unknown'])[0] if analysis.get('detected_apps') else 'Unknown',
+                'activity_description': analysis.get('activity_description', ''),
+                'activity_category': analysis.get('activity_category', 'unknown'),
+                'detected_text': analysis.get('detected_text', [])
+            }
+            
+            # Qdrant에 인덱싱
+            repo.index_screen_patches(doc_id, vectors, [meta])
+            
+        except Exception as e:
+            print(f"화면 활동 RAG 인덱싱 오류: {e}")
 
 class DataCollectionManager:
     """전체 데이터 수집을 관리하는 클래스"""
