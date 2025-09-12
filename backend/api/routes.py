@@ -1,8 +1,19 @@
+import os
+import sys
+from pathlib import Path
+
+# 현재 스크립트의 상위 디렉토리(backend)를 Python 경로에 추가
+backend_dir = Path(__file__).parent.parent.absolute()
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
 from fastapi import APIRouter, HTTPException, Depends, Form
 from fastapi.responses import JSONResponse
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import asyncio
+import signal
+from config.settings import settings
 
 from .schemas import UserIntent, SupervisorResponse, ChatRequest, ChatResponse
 from core.supervisor import supervisor
@@ -20,7 +31,11 @@ router = APIRouter()
 async def process_user_intent(user_intent: UserIntent):
     """사용자 의도를 처리하고 적절한 에이전트를 선택하여 실행합니다."""
     try:
-        response = await supervisor.process_user_intent(user_intent)
+        # 타임아웃과 함께 supervisor 처리
+        response = await asyncio.wait_for(
+            supervisor.process_user_intent(user_intent),
+            timeout=settings.REQUEST_TIMEOUT
+        )
         # SupervisorResponse를 딕셔너리로 변환하여 반환
         return {
             "success": response.success,
@@ -36,6 +51,11 @@ async def process_user_intent(user_intent: UserIntent):
                 "successful_agents": response.metadata.get("agent_responses", [])
             }
         }
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=408, 
+            detail=f"요청 처리 시간이 초과되었습니다. ({settings.REQUEST_TIMEOUT}초)"
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"처리 중 오류가 발생했습니다: {str(e)}")
 
@@ -49,8 +69,11 @@ async def chat_with_agent(chat_request: ChatRequest) -> ChatResponse:
             user_id=chat_request.user_id
         )
         
-        # Supervisor를 통해 처리
-        supervisor_response = await supervisor.process_user_intent(user_intent)
+        # 타임아웃과 함께 Supervisor를 통해 처리
+        supervisor_response = await asyncio.wait_for(
+            supervisor.process_user_intent(user_intent),
+            timeout=settings.REQUEST_TIMEOUT
+        )
         
         # ChatResponse로 변환
         return ChatResponse(
@@ -58,6 +81,11 @@ async def chat_with_agent(chat_request: ChatRequest) -> ChatResponse:
             message=supervisor_response.response.content if supervisor_response.success else supervisor_response.response,
             agent_type=supervisor_response.response.agent_type if supervisor_response.success else "unknown",
             metadata=supervisor_response.response.metadata if supervisor_response.success else {}
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=408, 
+            detail=f"채팅 처리 시간이 초과되었습니다. ({settings.REQUEST_TIMEOUT}초)"
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"채팅 처리 중 오류가 발생했습니다: {str(e)}")
@@ -110,15 +138,51 @@ async def health_check():
 
 # 데이터 수집 제어 엔드포인트들
 
-@router.post("/data-collection/start/{user_id}")
-async def start_data_collection(user_id: int):
-    """특정 사용자의 데이터 수집을 시작합니다."""
+@router.get("/data-collection/folders")
+async def get_c_drive_folders():
+    """C:\\Users\\koh\\Desktop 폴더의 하위 폴더 목록을 조회합니다."""
     try:
-        start_user_data_collection(user_id)
+        print("폴더 목록 조회 API 호출됨")
+        from database.data_collector import FileCollector
+        
+        # 임시 FileCollector 인스턴스 생성 (user_id는 임시로 1 사용)
+        print("FileCollector 인스턴스 생성 중...")
+        file_collector = FileCollector(user_id=1)
+        
+        print("C:\\Users\\koh\\Desktop 폴더 목록 조회 중...")
+        folders = file_collector.get_c_drive_folders()
+        
+        print(f"조회된 폴더 개수: {len(folders)}")
+        for i, folder in enumerate(folders[:5]):  # 처음 5개만 로그
+            print(f"  {i+1}. {folder.get('name', 'Unknown')} - {folder.get('path', 'Unknown')}")
+        
         return {
             "success": True,
-            "message": f"사용자 {user_id}의 데이터 수집이 시작되었습니다.",
+            "folders": folders,
+            "total_count": len(folders),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        print(f"폴더 목록 조회 오류: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"폴더 목록 조회 오류: {str(e)}")
+
+@router.post("/data-collection/start/{user_id}")
+async def start_data_collection(user_id: int, request_data: Optional[Dict[str, Any]] = None):
+    """특정 사용자의 데이터 수집을 시작합니다."""
+    try:
+        selected_folders = None
+        if request_data and "selected_folders" in request_data:
+            selected_folders = request_data["selected_folders"]
+        
+        start_user_data_collection(user_id, selected_folders)
+        folder_info = f" (선택된 폴더: {len(selected_folders)}개)" if selected_folders else " (전체 C드라이브)"
+        return {
+            "success": True,
+            "message": f"사용자 {user_id}의 데이터 수집이 시작되었습니다{folder_info}.",
             "user_id": user_id,
+            "selected_folders": selected_folders,
             "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:

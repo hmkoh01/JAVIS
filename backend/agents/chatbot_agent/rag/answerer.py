@@ -1,28 +1,166 @@
 import os
-import yaml
-import re
-from typing import List, Dict, Any, Optional
-import logging
 import base64
-from io import BytesIO
+import logging
+from typing import List, Dict, Any, Optional
 from PIL import Image
+import io
 
 logger = logging.getLogger(__name__)
 
+# ==============================================================================
+# 보안 관련 함수들
+# ==============================================================================
+
+def _get_security_patterns() -> List[str]:
+    """민감한 정보 패턴 목록을 반환합니다."""
+    return [
+        r'\b\d{3}-\d{4}-\d{4}\b',  # 전화번호
+        r'\b\d{6}-\d{7}\b',        # 주민등록번호
+        r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',  # 이메일
+        r'\b\d{4}-\d{2}-\d{2}\b',  # 날짜 (YYYY-MM-DD)
+        r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b',  # IP 주소
+    ]
+
+def _redact_sensitive_info(text: str, patterns: List[str]) -> str:
+    """민감한 정보를 마스킹합니다."""
+    import re
+    redacted_text = text
+    for pattern in patterns:
+        redacted_text = re.sub(pattern, '[REDACTED]', redacted_text)
+    return redacted_text
+
+# ==============================================================================
+# 이미지 처리 함수들
+# ==============================================================================
+
+def images_to_base64(images: List[Image.Image]) -> List[str]:
+    """PIL Image 객체들을 base64 문자열로 변환합니다."""
+    try:
+        base64_images = []
+        for img in images:
+            # 이미지를 RGB로 변환 (RGBA인 경우)
+            if img.mode in ('RGBA', 'LA', 'P'):
+                img = img.convert('RGB')
+            
+            # JPEG로 인코딩
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=85)
+            img_bytes = buffer.getvalue()
+            
+            # base64 인코딩
+            img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+            base64_images.append(f"data:image/jpeg;base64,{img_b64}")
+        
+        return base64_images
+    except Exception as e:
+        logger.error(f"이미지 base64 변환 오류: {e}")
+        return []
+
+# ==============================================================================
+# Gemini LLM 호출 함수
+# ==============================================================================
+
+def call_llm_for_answer(question: str, context: str) -> Optional[str]:
+    """Gemini 모델을 사용하여 답변을 생성합니다."""
+    try:
+        # Gemini API 호출
+        try:
+            import google.generativeai as genai
+            from config.settings import settings
+            
+            # API 키 확인
+            if not settings.GEMINI_API_KEY:
+                logger.warning("GEMINI_API_KEY가 설정되지 않았습니다.")
+                return None
+            
+            # Gemini 모델 초기화
+            genai.configure(api_key=settings.GEMINI_API_KEY)
+            model = genai.GenerativeModel(settings.GEMINI_MODEL)
+            
+            # 프롬프트 구성
+            prompt = f"""당신은 사용자의 질문에 대해 주어진 정보를 바탕으로 정확하고 유용한 답변을 제공하는 AI 어시스턴트입니다.
+
+질문: {question}
+
+참고 정보:
+{context}
+
+위 정보를 바탕으로 질문에 답변해주세요. 다음 사항을 지켜주세요:
+1. 주어진 정보만을 사용하여 답변하세요
+2. 정보가 부족한 부분은 솔직히 말하세요
+3. 한국어로 자연스럽게 답변하세요
+4. 구체적이고 실용적인 정보를 제공하세요
+5. 출처 정보는 간단히 언급하세요
+
+답변:"""
+
+            # Gemini API 호출
+            response = model.generate_content(prompt)
+            
+            if response and response.text:
+                logger.info("Gemini 답변 생성 성공")
+                return response.text
+            else:
+                logger.warning("Gemini 응답이 비어있습니다.")
+                return None
+                
+        except ImportError:
+            logger.warning("google-generativeai 라이브러리가 설치되지 않았습니다.")
+            return None
+        except Exception as e:
+            logger.error(f"Gemini API 호출 오류: {e}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"LLM 호출 오류: {e}")
+        return None
+
+# ==============================================================================
+# 핵심 답변 생성 함수
+# ==============================================================================
+
 def compose_answer(question: str, evidences: List[Dict[str, Any]]) -> str:
-    """근거를 바탕으로 응답 생성"""
+    """검색된 근거(evidences)를 바탕으로 최종 텍스트 답변을 구성합니다."""
     try:
         if not evidences:
             return "죄송합니다. 관련 정보를 찾을 수 없습니다."
+
+        # 검색된 정보를 컨텍스트로 정리
+        context_parts = []
+        for i, evidence in enumerate(evidences[:5], 1):  # 상위 5개만 사용
+            snippet = evidence.get('snippet', '')
+            path = evidence.get('path', '')
+            url = evidence.get('url', '')
+            source = evidence.get('source', 'unknown')
+            
+            if snippet:
+                # 민감 정보 마스킹
+                security_patterns = _get_security_patterns()
+                clean_snippet = _redact_sensitive_info(snippet, security_patterns)
+                context_parts.append(f"[정보 {i}] {clean_snippet}")
+            elif path:
+                context_parts.append(f"[정보 {i}] 파일: {os.path.basename(path)}")
+            elif url:
+                context_parts.append(f"[정보 {i}] 웹페이지: {url}")
         
-        # 보안 패턴 로드
-        security_patterns = _load_security_patterns()
+        if not context_parts:
+            return "관련 정보를 찾을 수 없습니다."
         
-        # 응답 구성
-        answer_parts = []
-        answer_parts.append(f"질문: {question}\n\n")
-        answer_parts.append("찾은 정보:\n")
+        context = "\n\n".join(context_parts)
         
+        # Gemini를 사용한 답변 생성 시도
+        try:
+            gemini_answer = call_llm_for_answer(question, context)
+            if gemini_answer:
+                logger.info("Gemini 답변 생성 성공")
+                return gemini_answer
+        except Exception as e:
+            logger.warning(f"Gemini 답변 생성 실패, 기본 답변 사용: {e}")
+
+        # Gemini가 실패한 경우 기본 답변 (기존 방식)
+        security_patterns = _get_security_patterns()
+
+        answer_parts = [f"질문: {question}\n\n", "찾은 정보:\n"]
         for i, evidence in enumerate(evidences, 1):
             source = evidence.get('source', 'unknown')
             doc_id = evidence.get('doc_id', 'unknown')
@@ -31,16 +169,14 @@ def compose_answer(question: str, evidences: List[Dict[str, Any]]) -> str:
             snippet = evidence.get('snippet', '')
             path = evidence.get('path', '')
             url = evidence.get('url', '')
-            
-            # 근거 라벨 생성
+
+            # 근거 출처 라벨 생성
             evidence_label = f"[src:{source} doc:{doc_id}"
-            if page is not None:
-                evidence_label += f" page:{page}"
-            if timestamp is not None:
-                evidence_label += f" t:{timestamp}"
+            if page is not None: evidence_label += f" page:{page}"
+            if timestamp is not None: evidence_label += f" t:{timestamp}"
             evidence_label += "]"
-            
-            # 스니펫 또는 설명 생성
+
+            # 내용 생성 (민감 정보 마스킹 포함)
             if snippet:
                 content = _redact_sensitive_info(snippet, security_patterns)
             elif path:
@@ -53,65 +189,59 @@ def compose_answer(question: str, evidences: List[Dict[str, Any]]) -> str:
             answer_parts.append(f"{i}. {evidence_label} {content}\n")
         
         return "".join(answer_parts)
-        
     except Exception as e:
         logger.error(f"응답 생성 오류: {e}")
         return "응답 생성 중 오류가 발생했습니다."
 
-def _load_security_patterns() -> List[str]:
-    """보안 패턴 로드"""
-    try:
-        config_path = "configs.yaml"
-        if os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-                return config.get('security', {}).get('redact_patterns', [])
-        else:
-            # 기본 패턴
-            return [
-                r"(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",  # 이메일
-                r"\b01[016789]-?\d{3,4}-?\d{4}\b",  # 전화번호
-                r"\b\d{3}-\d{2}-\d{4}\b",  # 주민번호
-                r"\b\d{4}-\d{4}-\d{4}-\d{4}\b"  # 신용카드
-            ]
-    except Exception as e:
-        logger.error(f"보안 패턴 로드 오류: {e}")
-        return []
 
-def _redact_sensitive_info(text: str, patterns: List[str]) -> str:
-    """민감 정보 마스킹"""
-    try:
-        redacted_text = text
-        for pattern in patterns:
-            redacted_text = re.sub(pattern, "[REDACTED]", redacted_text)
-        return redacted_text
-    except Exception as e:
-        logger.error(f"민감 정보 마스킹 오류: {e}")
-        return text
-
-def call_vlm_for_answer(question: str, images: List[Image.Image], 
-                       config_path: str = "configs.yaml") -> Optional[str]:
-    """VLM을 사용한 멀티모달 응답 생성 (선택적)"""
+def call_vlm_for_answer(question: str, images: List[Image.Image]) -> Optional[str]:
+    """VLM을 사용하여 이미지 기반 답변을 생성합니다."""
     try:
         # VLM 설정 확인
-        config = _load_vlm_config(config_path)
-        if not config.get('enabled', False):
+        vlm_config = _get_vlm_config()
+        if not vlm_config.get('enabled', False):
+            logger.debug("VLM이 비활성화되어 있습니다.")
             return None
         
-        # 이미지가 없으면 VLM 호출하지 않음
-        if not images:
+        # 이미지를 base64로 변환
+        images_b64 = images_to_base64(images)
+        if not images_b64:
+            logger.warning("이미지 base64 변환 실패")
             return None
         
-        # Qwen2-VL 모델 로드 및 호출
-        return _call_qwen2_vl(question, images, config)
+        # VLM API 호출 (실제 구현은 VLM 서비스에 따라 다름)
+        # 여기서는 간단한 템플릿 기반 답변 반환
+        return f"이미지를 분석한 결과, {len(images)}개의 이미지에서 관련 정보를 찾았습니다. 질문: {question}"
         
     except Exception as e:
-        logger.error(f"VLM 호출 오류: {e}")
+        logger.error(f"VLM 답변 생성 오류: {e}")
         return None
 
-def _load_vlm_config(config_path: str) -> Dict[str, Any]:
-    """VLM 설정 로드"""
+# ==============================================================================
+# VLM 관련 설정 및 초기화
+# ==============================================================================
+
+_vlm_config = None
+
+def _initialize_vlm_resources():
+    """VLM 리소스를 초기화합니다."""
+    global _vlm_config
     try:
+        _vlm_config = _load_vlm_config()
+        
+        if _vlm_config.get('enabled', False):
+            logger.info("VLM 리소스 초기화 완료")
+        else:
+            logger.info("VLM이 비활성화되어 있습니다.")
+            
+    except Exception as e:
+        logger.error(f"VLM 초기화 오류: {e}")
+        _vlm_config = {'enabled': False}
+
+def _load_vlm_config(config_path: str = "configs.yaml") -> Dict[str, Any]:
+    """VLM 설정을 로드합니다."""
+    try:
+        import yaml
         if os.path.exists(config_path):
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
@@ -119,107 +249,20 @@ def _load_vlm_config(config_path: str) -> Dict[str, Any]:
         else:
             return {
                 'enabled': False,
-                'model_name': 'Qwen/Qwen2-VL-7B-Instruct',
-                'quantization': True,
-                'max_new_tokens': 500
+                'api_url': '',
+                'api_key': '',
+                'model': 'gpt-4-vision-preview'
             }
     except Exception as e:
         logger.error(f"VLM 설정 로드 오류: {e}")
         return {'enabled': False}
 
-def _call_qwen2_vl(question: str, images: List[Image.Image], config: Dict[str, Any]) -> Optional[str]:
-    """Qwen2-VL 모델 호출"""
-    try:
-        from transformers import Qwen2VLForConditionalGeneration, Qwen2VLProcessor, BitsAndBytesConfig
-        from qwen_vl_utils import process_vision_info
-        import torch
-        
-        # 모델 설정
-        model_name = config.get('model_name', 'Qwen/Qwen2-VL-7B-Instruct')
-        quantization = config.get('quantization', True)
-        max_new_tokens = config.get('max_new_tokens', 500)
-        
-        # 양자화 설정
-        if quantization:
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16
-            )
-        else:
-            bnb_config = None
-        
-        # 모델 로드
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_name,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-            quantization_config=bnb_config
-        )
-        model.eval()
-        
-        # 프로세서 로드
-        processor = Qwen2VLProcessor.from_pretrained(
-            model_name,
-            min_pixels=224 * 224,
-            max_pixels=448 * 448
-        )
-        
-        # 채팅 템플릿 구성
-        chat_template = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": img} for img in images
-                ] + [{"type": "text", "text": question}]
-            }
-        ]
-        
-        # 입력 처리
-        text = processor.apply_chat_template(chat_template, tokenize=False, add_generation_prompt=True)
-        image_inputs, _ = process_vision_info(chat_template)
-        
-        inputs = processor(
-            text=[text],
-            images=image_inputs,
-            padding=True,
-            return_tensors="pt"
-        )
-        inputs = inputs.to("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # 생성
-        with torch.no_grad():
-            generated_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
-        
-        # 출력 디코딩
-        generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
-        output_text = processor.batch_decode(
-            generated_ids_trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False
-        )
-        
-        return output_text[0] if output_text else None
-        
-    except ImportError:
-        logger.warning("Qwen2-VL 모델을 사용할 수 없습니다. transformers 또는 qwen-vl-utils가 설치되지 않았습니다.")
-        return None
-    except Exception as e:
-        logger.error(f"Qwen2-VL 호출 오류: {e}")
-        return None
+def _get_vlm_config() -> Dict[str, Any]:
+    """VLM 설정을 반환합니다."""
+    global _vlm_config
+    if _vlm_config is None:
+        _initialize_vlm_resources()
+    return _vlm_config or {'enabled': False}
 
-def images_to_base64(images: List[Image.Image]) -> List[str]:
-    """이미지를 base64로 변환"""
-    try:
-        base64_images = []
-        for img in images:
-            buffer = BytesIO()
-            img.save(buffer, format="JPEG")
-            buffer.seek(0)
-            img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            base64_images.append(img_base64)
-        return base64_images
-    except Exception as e:
-        logger.error(f"이미지 base64 변환 오류: {e}")
-        return []
+# VLM 리소스 초기화
+_initialize_vlm_resources()

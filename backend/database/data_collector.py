@@ -1,5 +1,13 @@
+#!/usr/bin/env python3
 import os
 import sys
+from pathlib import Path
+
+# 현재 스크립트의 상위 디렉토리(backend)를 Python 경로에 추가
+backend_dir = Path(__file__).parent.parent.absolute()
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
 import time
 import json
 import sqlite3
@@ -8,10 +16,8 @@ import platform
 import threading
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
-from pathlib import Path
 import asyncio
 import aiofiles
-import sqlite3
 import winreg
 import subprocess
 import numpy as np
@@ -23,7 +29,7 @@ from config.settings import settings
 # RAG 시스템 연동을 위한 import
 from .repository import Repository
 from .sqlite_meta import SQLiteMeta
-from agents.chatbot_agent.rag.models.colqwen2_embedder import ColQwen2Embedder
+from agents.chatbot_agent.rag.models.colqwen2_embedder import ColQwen2Embedder   
 
 class FileCollector:
     """사용자 드라이브의 파일들을 수집하는 클래스"""
@@ -31,16 +37,22 @@ class FileCollector:
     def __init__(self, user_id: int):
         self.user_id = user_id
         self.sqlite_meta = SQLiteMeta()
+        
+        # 수집할 파일 확장자 목록 (허용 리스트)
         self.supported_extensions = {
-            'document': ['.txt', '.doc', '.docx', '.pdf', '.rtf', '.odt'],
+            'document': ['.txt', '.doc', '.docx', '.pdf', '.hwp', '.md'],
             'spreadsheet': ['.xls', '.xlsx', '.csv', '.ods'],
             'presentation': ['.ppt', '.pptx', '.odp'],
-            'image': ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'],
-            'video': ['.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv'],
-            'audio': ['.mp3', '.wav', '.flac', '.aac', '.ogg'],
-            'code': ['.py', '.js', '.html', '.css', '.java', '.cpp', '.c', '.php', '.rb', '.go', '.rs'],
-            'archive': ['.zip', '.rar', '.7z', '.tar', '.gz']
+            'code': ['.py', '.js', '.html', '.css', '.java', '.cpp'],
         }
+        
+        # 💡 허용할 확장자 목록을 하나의 세트(set)로 통합 (효율적인 탐색을 위해)
+        self.allowed_extensions = set()
+        for extensions in self.supported_extensions.values():
+            self.allowed_extensions.update(extensions)
+            
+        # 파일 해시 캐시 (중복 방지용)
+        self.file_hash_cache = {}
         
     def get_file_category(self, file_path: str) -> str:
         """파일 확장자를 기반으로 카테고리를 결정합니다."""
@@ -57,82 +69,458 @@ class FileCollector:
             'Windows', 'Program Files', 'Program Files (x86)', 
             '$Recycle.Bin', 'System Volume Information', '.git',
             'node_modules', '__pycache__', '.vscode', '.idea',
-            'AppData', 'Local', 'Roaming', 'Temp', 'tmp'
+            'AppData', 'Temp', 'tmp', 'ProgramData', 'Recovery',
+            'Boot', 'EFI', 'MSOCache'
         ]
         
-        dir_name = Path(dir_path).name.lower()
-        return any(pattern.lower() in dir_name for pattern in skip_patterns)
+        path_parts = Path(dir_path).parts
+        return any(part in skip_patterns for part in path_parts)
     
-    def collect_files_from_drive(self, drive_path: str = "C:\\") -> List[Dict[str, Any]]:
+    # ❌ 기존의 복잡했던 should_skip_file 메서드는 삭제합니다.
+
+    def calculate_file_hash(self, file_path: str) -> str:
+        """파일의 해시값을 계산합니다."""
+        try:
+            if os.path.getsize(file_path) > 100 * 1024 * 1024:  # 100MB
+                return f"large_file_{os.path.getsize(file_path)}"
+            
+            hash_md5 = hashlib.md5()
+            with open(file_path, "rb") as f:
+                chunk = f.read(1024 * 1024) # 1MB만 읽어 해시 계산
+                hash_md5.update(chunk)
+            return hash_md5.hexdigest()
+        except Exception as e:
+            # print(f"파일 해시 계산 오류 {file_path}: {e}") # 로그 최소화
+            return f"error_{int(time.time())}"
+    
+    def is_file_duplicate(self, file_path: str, file_hash: str) -> bool:
+        """파일이 중복인지 확인합니다."""
+        try:
+            return self.sqlite_meta.is_file_hash_exists(file_hash)
+        except Exception as e:
+            print(f"중복 체크 오류 {file_path}: {e}")
+            return False
+    
+    def is_file_modified(self, file_path: str, last_modified: datetime) -> bool:
+        """파일이 수정되었는지 확인합니다."""
+        try:
+            stored_modified = self.sqlite_meta.get_file_last_modified(file_path)
+            if stored_modified is None:
+                return True
+            return last_modified > stored_modified
+        except Exception as e:
+            print(f"파일 수정 체크 오류 {file_path}: {e}")
+            return True
+    
+    def get_c_drive_folders(self) -> List[Dict[str, Any]]:
+        print("get_c_drive_folders 메서드 시작")
+        folders = []
+        base_path = "C:\\Users\\koh\\Desktop"
+        
+        try:
+            print(f"기준 경로: {base_path}")
+            
+            # 기준 경로가 존재하는지 확인
+            if not os.path.exists(base_path):
+                print(f"기준 경로가 존재하지 않습니다: {base_path}")
+                return folders
+            
+            items = os.listdir(base_path)
+            print(f"기준 경로 항목 개수: {len(items)}")
+            
+            for item in items:
+                item_path = os.path.join(base_path, item)
+                print(f"확인 중: {item_path}")
+                
+                if os.path.isdir(item_path):
+                    print(f"  - 디렉토리임: {item}")
+                    if not self.should_skip_directory(item_path):
+                        print(f"  - 스킵하지 않음: {item}")
+                        # 폴더 정보 수집
+                        try:
+                            stat = os.stat(item_path)
+                            folder_info = {
+                                'name': item,
+                                'path': item_path,
+                                'created_date': datetime.fromtimestamp(stat.st_ctime),
+                                'modified_date': datetime.fromtimestamp(stat.st_mtime),
+                                'size': self._get_folder_size(item_path)
+                            }
+                            folders.append(folder_info)
+                            print(f"  - 추가됨: {item}")
+                        except (PermissionError, OSError) as e:
+                            # 접근 권한이 없는 폴더는 건너뛰기
+                            print(f"  - 접근 권한 없음: {item} - {e}")
+                            continue
+                    else:
+                        print(f"  - 스킵됨: {item}")
+                else:
+                    print(f"  - 파일임: {item}")
+                        
+        except Exception as e:
+            print(f"폴더 목록 조회 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            
+        # 이름순으로 정렬
+        folders.sort(key=lambda x: x['name'].lower())
+        print(f"최종 폴더 개수: {len(folders)}")
+        return folders
+    
+    def _get_folder_size(self, folder_path: str) -> int:
+        """폴더의 대략적인 크기를 계산합니다."""
+        total_size = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(folder_path):
+                for filename in filenames:
+                    try:
+                        filepath = os.path.join(dirpath, filename)
+                        total_size += os.path.getsize(filepath)
+                    except (OSError, FileNotFoundError):
+                        continue
+        except Exception:
+            pass
+        return total_size
+
+    def _collect_files_from_selected_folders(self, selected_folders: List[str], incremental: bool = True, manager: Optional['DataCollectionManager'] = None) -> List[Dict[str, Any]]:
+        """선택된 폴더들에서만 파일을 수집합니다."""
+        collected_files = []
+        total_folders = len(selected_folders)
+        processed_folders = 0
+        
+        last_update_time = time.time()
+        update_interval = 0.1
+        
+        for folder_path in selected_folders:
+            if not os.path.exists(folder_path) or not os.path.isdir(folder_path):
+                print(f"폴더가 존재하지 않거나 접근할 수 없습니다: {folder_path}")
+                continue
+                
+            try:
+                if manager:
+                    processed_folders += 1
+                    progress = (processed_folders / total_folders) * 80.0
+                    manager.progress = progress
+                    manager.progress_message = f"📁 스캔 중: {folder_path}"
+                
+                for root, dirs, files in os.walk(folder_path):
+                    # 스킵할 디렉토리 필터링
+                    dirs[:] = [d for d in dirs if not self.should_skip_directory(os.path.join(root, d))]
+                    
+                    for file in files:
+                        if manager:
+                            current_time = time.time()
+                            if current_time - last_update_time > update_interval:
+                                folder_scan_message = manager.progress_message.split(' | ')[0]
+                                manager.progress_message = f"{folder_scan_message} | 🔍 {file[:50]}"
+                                last_update_time = current_time
+
+                        try:
+                            file_path = os.path.join(root, file)
+                            
+                            # 허용된 확장자인지 확인
+                            file_ext = Path(file_path).suffix.lower()
+                            if file_ext not in self.allowed_extensions:
+                                continue
+                            
+                            stat = os.stat(file_path)
+                            modified_date = datetime.fromtimestamp(stat.st_mtime)
+                            
+                            if incremental and not self.is_file_modified(file_path, modified_date):
+                                continue
+                            
+                            file_hash = self.calculate_file_hash(file_path)
+                            
+                            if self.is_file_duplicate(file_path, file_hash):
+                                continue
+                            
+                            file_info = {
+                                'user_id': self.user_id,
+                                'file_path': file_path,
+                                'file_name': file,
+                                'file_size': stat.st_size,
+                                'file_type': file_ext,
+                                'file_category': self.get_file_category(file_path),
+                                'file_hash': file_hash,
+                                'created_date': datetime.fromtimestamp(stat.st_ctime),
+                                'modified_date': modified_date,
+                                'accessed_date': datetime.fromtimestamp(stat.st_atime),
+                                'discovered_at': datetime.utcnow()
+                            }
+                            
+                            collected_files.append(file_info)
+                            
+                        except (PermissionError, OSError):
+                            continue
+                        except Exception as e:
+                            print(f"파일 처리 중 오류 {file_path}: {e}")
+                            continue
+                            
+            except Exception as e:
+                print(f"폴더 스캔 오류 {folder_path}: {e}")
+                continue
+                
+        return collected_files
+
+    def collect_files_from_drive(self, drive_path: str = "C:\\", incremental: bool = True, manager: Optional['DataCollectionManager'] = None, selected_folders: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """지정된 드라이브에서 파일들을 수집합니다."""
         collected_files = []
         
+        # 선택된 폴더가 있으면 해당 폴더들만 스캔
+        if selected_folders:
+            return self._collect_files_from_selected_folders(selected_folders, incremental, manager)
+        
+        # 기존 로직: 전체 드라이브 스캔
+        top_level_dirs = []
+        total_dirs = 1
+        processed_dirs = 0
+        if manager and not incremental:
+            try:
+                top_level_dirs = [d for d in os.listdir(drive_path) if os.path.isdir(os.path.join(drive_path, d)) and not self.should_skip_directory(d)]
+                total_dirs = len(top_level_dirs)
+            except Exception as e:
+                print(f"최상위 디렉토리 목록 생성 오류: {e}")
+                top_level_dirs = []
+                total_dirs = 1
+
+        last_update_time = time.time()
+        update_interval = 0.1
+
         try:
             for root, dirs, files in os.walk(drive_path):
-                # 건너뛸 디렉토리 제거
+                if manager and not incremental and total_dirs > 0 and top_level_dirs:
+                    try:
+                        current_top_dir = root.split(os.sep)[1] if len(root.split(os.sep)) > 1 else ""
+                        if current_top_dir and current_top_dir in top_level_dirs:
+                            current_index = top_level_dirs.index(current_top_dir)
+                            if current_index >= processed_dirs:
+                                processed_dirs = current_index + 1
+                                progress = (processed_dirs / total_dirs) * 80.0
+                                manager.progress = progress
+                                manager.progress_message = f"📁 스캔 중: {os.path.join(drive_path, current_top_dir)}"
+                    except Exception:
+                        pass
+
                 dirs[:] = [d for d in dirs if not self.should_skip_directory(os.path.join(root, d))]
                 
                 for file in files:
+                    if manager:
+                        current_time = time.time()
+                        if current_time - last_update_time > update_interval:
+                            dir_scan_message = manager.progress_message.split(' | ')[0]
+                            manager.progress_message = f"{dir_scan_message} | 🔍 {file[:50]}"
+                            last_update_time = current_time
+
                     try:
                         file_path = os.path.join(root, file)
                         
-                        # 파일 정보 수집
+                        # ✅ 허용된 확장자인지 먼저 확인하는 방식으로 변경
+                        file_ext = Path(file_path).suffix.lower()
+                        if file_ext not in self.allowed_extensions:
+                            continue
+                        
                         stat = os.stat(file_path)
+                        modified_date = datetime.fromtimestamp(stat.st_mtime)
+                        
+                        if incremental and not self.is_file_modified(file_path, modified_date):
+                            continue
+                        
+                        file_hash = self.calculate_file_hash(file_path)
+                        
+                        if self.is_file_duplicate(file_path, file_hash):
+                            continue
                         
                         file_info = {
                             'user_id': self.user_id,
                             'file_path': file_path,
                             'file_name': file,
                             'file_size': stat.st_size,
-                            'file_type': Path(file).suffix.lower(),
+                            'file_type': file_ext,
                             'file_category': self.get_file_category(file_path),
+                            'file_hash': file_hash,
                             'created_date': datetime.fromtimestamp(stat.st_ctime),
-                            'modified_date': datetime.fromtimestamp(stat.st_mtime),
+                            'modified_date': modified_date,
                             'accessed_date': datetime.fromtimestamp(stat.st_atime),
                             'discovered_at': datetime.utcnow()
                         }
                         
                         collected_files.append(file_info)
                         
-                    except (PermissionError, OSError) as e:
-                        print(f"파일 접근 오류 {file_path}: {e}")
+                    except (PermissionError, OSError):
+                        continue
+                    except Exception as e:
+                        print(f"파일 처리 중 오류 {file_path}: {e}")
                         continue
                         
         except Exception as e:
             print(f"드라이브 스캔 오류: {e}")
             
         return collected_files
-    
+
+    # ... (FileCollector의 나머지 메서드들은 이전과 동일) ...
     def save_files_to_db(self, files: List[Dict[str, Any]]) -> int:
-        """수집된 파일들을 데이터베이스에 저장하고 RAG 시스템에 인덱싱합니다."""
+        """수집된 파일들을 데이터베이스에 배치 저장하고 RAG 시스템에 인덱싱합니다."""
+        if not files:
+            return 0
+        
         saved_count = 0
         
-        # RAG 시스템 초기화
+        # RAG 시스템 초기화 (한 번만)
+        repo = None
+        embedder = None
         try:
             repo = Repository()
-            embedder = ColQwen2Embedder.load()
+            embedder = ColQwen2Embedder()
+            print("✅ RAG 시스템 초기화 완료")
         except Exception as e:
-            print(f"RAG 시스템 초기화 오류: {e}")
-            repo = None
-            embedder = None
+            print(f"⚠️ RAG 시스템 초기화 실패, SQLite만 저장: {e}")
         
-        for file_info in files:
-            try:
-                # 1. SQLite에 저장
-                success = self.sqlite_meta.insert_collected_file(file_info)
-                
-                if success:
-                    # 2. RAG 시스템에 인덱싱
-                    if repo and embedder:
-                        self._index_file_for_rag(file_info, repo, embedder)
-                    
-                    saved_count += 1
-                
-            except Exception as e:
-                print(f"파일 저장 오류 {file_info['file_path']}: {e}")
-                continue
+        # 배치 처리를 위한 데이터 준비
+        batch_size = 50  # 배치 크기 설정
+        text_chunks_for_embedding = []
+        image_files_for_embedding = []
+        file_metadata_batch = []
+        
+        # 1단계: SQLite 배치 저장
+        print(f"💾 {len(files)}개 파일을 SQLite에 배치 저장 중...")
+        try:
+            # 트랜잭션 시작
+            self.sqlite_meta.conn.execute("BEGIN TRANSACTION")
             
+            for file_info in files:
+                try:
+                    success = self.sqlite_meta.insert_collected_file(file_info)
+                    if success:
+                        saved_count += 1
+                        file_metadata_batch.append(file_info)
+                        
+                        # RAG 인덱싱용 데이터 준비
+                        if repo and embedder:
+                            file_category = file_info['file_category']
+                            if file_category in ['document', 'spreadsheet', 'presentation', 'code']:
+                                text_chunks_for_embedding.append(file_info)
+                            elif file_category == 'image':
+                                image_files_for_embedding.append(file_info)
+                                
+                except Exception as e:
+                    print(f"파일 저장 오류 {file_info['file_path']}: {e}")
+                    continue
+            
+            # 트랜잭션 커밋
+            self.sqlite_meta.conn.commit()
+            print(f"✅ SQLite 배치 저장 완료: {saved_count}개 파일")
+            
+        except Exception as e:
+            self.sqlite_meta.conn.rollback()
+            print(f"❌ SQLite 배치 저장 실패: {e}")
+            return 0
+        
+        # 2단계: RAG 시스템 배치 인덱싱
+        if repo and embedder and (text_chunks_for_embedding or image_files_for_embedding):
+            print(f"🔍 RAG 시스템 배치 인덱싱 시작...")
+            
+            # 텍스트 파일 배치 처리
+            if text_chunks_for_embedding:
+                self._batch_index_text_files(text_chunks_for_embedding, repo, embedder, batch_size)
+            
+            # 이미지 파일 배치 처리
+            if image_files_for_embedding:
+                self._batch_index_image_files(image_files_for_embedding, repo, embedder, batch_size)
+            
+            print("✅ RAG 시스템 배치 인덱싱 완료")
+        
         return saved_count
+
+    def _batch_index_text_files(self, text_files: List[Dict[str, Any]], repo: Repository, embedder: ColQwen2Embedder, batch_size: int):
+        """텍스트 파일들을 배치로 인덱싱"""
+        try:
+            all_chunks = []
+            all_metas = []
+            all_doc_ids = []
+            
+            # 모든 텍스트 파일의 청크 수집
+            for file_info in text_files:
+                try:
+                    file_path = file_info['file_path']
+                    content = self._extract_text_content(file_path)
+                    if not content:
+                        continue
+                    
+                    chunks = self._chunk_text(content, chunk_size=1000)
+                    doc_id = f"file_{hash(file_path)}"
+                    
+                    for i, chunk in enumerate(chunks):
+                        all_chunks.append(chunk)
+                        all_metas.append({
+                            'page': i + 1,
+                            'snippet': chunk[:200] + "..." if len(chunk) > 200 else chunk,
+                            'path': file_path,
+                            'doc_id': doc_id,
+                            'chunk_id': i
+                        })
+                        all_doc_ids.append(doc_id)
+                        
+                except Exception as e:
+                    print(f"텍스트 파일 처리 오류 {file_info['file_path']}: {e}")
+                    continue
+            
+            if not all_chunks:
+                return
+            
+            # 배치로 임베딩 생성
+            print(f"🧠 {len(all_chunks)}개 텍스트 청크 임베딩 생성 중...")
+            vectors = embedder.encode_text_batch(all_chunks, batch_size=batch_size)
+            
+            # 배치로 Qdrant에 인덱싱
+            print(f"💾 {len(vectors)}개 벡터를 Qdrant에 배치 저장 중...")
+            repo.index_text_chunks_batch(all_doc_ids, vectors, all_metas, batch_size)
+            
+        except Exception as e:
+            print(f"텍스트 파일 배치 인덱싱 오류: {e}")
+
+    def _batch_index_image_files(self, image_files: List[Dict[str, Any]], repo: Repository, embedder: ColQwen2Embedder, batch_size: int):
+        """이미지 파일들을 배치로 인덱싱"""
+        try:
+            all_images = []
+            all_metas = []
+            all_doc_ids = []
+            
+            # 모든 이미지 파일 수집
+            for file_info in image_files:
+                try:
+                    file_path = file_info['file_path']
+                    from PIL import Image
+                    
+                    image = Image.open(file_path)
+                    doc_id = f"file_{hash(file_path)}"
+                    
+                    all_images.append(image)
+                    all_metas.append({
+                        'bbox': [0, 0, image.width, image.height],
+                        'path': file_path,
+                        'image_size': f"{image.width}x{image.height}",
+                        'doc_id': doc_id,
+                        'patch_id': 0
+                    })
+                    all_doc_ids.append(doc_id)
+                    
+                except Exception as e:
+                    print(f"이미지 파일 처리 오류 {file_info['file_path']}: {e}")
+                    continue
+            
+            if not all_images:
+                return
+            
+            # 배치로 임베딩 생성
+            print(f"🖼️ {len(all_images)}개 이미지 임베딩 생성 중...")
+            vectors = embedder.encode_image_batch(all_images, batch_size=batch_size)
+            
+            # 배치로 Qdrant에 인덱싱
+            print(f"💾 {len(vectors)}개 벡터를 Qdrant에 배치 저장 중...")
+            repo.index_image_patches_batch(all_doc_ids, vectors, all_metas, batch_size)
+            
+        except Exception as e:
+            print(f"이미지 파일 배치 인덱싱 오류: {e}")
 
     def _index_file_for_rag(self, file_info: Dict[str, Any], repo: Repository, embedder: ColQwen2Embedder):
         """파일을 RAG 시스템에 인덱싱"""
@@ -294,7 +682,12 @@ class FileCollector:
             pass
         return ""
 
+# -----------------------------------------------------------------------------
+# 아래의 다른 Collector 및 Manager 클래스들은 변경사항이 없습니다.
+# -----------------------------------------------------------------------------
+
 class BrowserHistoryCollector:
+    # ... (변경 없음)
     """브라우저 사용 기록을 수집하는 클래스"""
     
     def __init__(self, user_id: int):
@@ -305,17 +698,15 @@ class BrowserHistoryCollector:
                 'path': os.path.expanduser('~\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\History'),
                 'name': 'Chrome'
             },
-            'firefox': {
-                'path': os.path.expanduser('~\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles'),
-                'name': 'Firefox'
-            },
             'edge': {
                 'path': os.path.expanduser('~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\History'),
                 'name': 'Edge'
             }
         }
+        # 브라우저 히스토리 캐시 (중복 방지용)
+        self.history_cache = set()
     
-    def get_chrome_history(self) -> List[Dict[str, Any]]:
+    def get_chrome_history(self, incremental: bool = True) -> List[Dict[str, Any]]:
         """Chrome 브라우저 히스토리를 수집합니다."""
         history_data = []
         
@@ -332,16 +723,45 @@ class BrowserHistoryCollector:
             conn = sqlite3.connect(temp_path)
             cursor = conn.cursor()
             
-            cursor.execute("""
-                SELECT url, title, visit_count, last_visit_time, typed_count
-                FROM urls ORDER BY last_visit_time DESC LIMIT 1000
-            """)
+            # 증분 수집을 위해 마지막 수집 시간 이후의 히스토리만 가져오기
+            if incremental:
+                last_collection_time = self.sqlite_meta.get_last_browser_collection_time(self.user_id, 'Chrome')
+                if last_collection_time:
+                    # Chrome 시간 형식으로 변환
+                    chrome_timestamp = int((last_collection_time - datetime(1601, 1, 1)).total_seconds() * 1000000)
+                    cursor.execute("""
+                        SELECT url, title, visit_count, last_visit_time, typed_count
+                        FROM urls 
+                        WHERE last_visit_time > ?
+                        ORDER BY last_visit_time DESC LIMIT 1000
+                    """, (chrome_timestamp,))
+                else:
+                    cursor.execute("""
+                        SELECT url, title, visit_count, last_visit_time, typed_count
+                        FROM urls ORDER BY last_visit_time DESC LIMIT 1000
+                    """)
+            else:
+                cursor.execute("""
+                    SELECT url, title, visit_count, last_visit_time, typed_count
+                    FROM urls ORDER BY last_visit_time DESC LIMIT 1000
+                """)
             
             for row in cursor.fetchall():
                 url, title, visit_count, last_visit_time, typed_count = row
                 
                 # Chrome 시간을 datetime으로 변환
                 chrome_time = datetime(1601, 1, 1) + timedelta(microseconds=last_visit_time)
+                
+                # 중복 체크 (URL + 방문 시간 조합)
+                history_key = f"{url}_{chrome_time.timestamp()}"
+                if history_key in self.history_cache:
+                    continue
+                
+                # 데이터베이스에서 중복 확인
+                if self.sqlite_meta.is_browser_history_duplicate(self.user_id, url, chrome_time):
+                    continue
+                
+                self.history_cache.add(history_key)
                 
                 history_data.append({
                     'user_id': self.user_id,
@@ -369,62 +789,79 @@ class BrowserHistoryCollector:
         try:
             import winreg
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
-                               r"Software\Google\Chrome\BLBeacon")
+                                r"Software\Google\Chrome\BLBeacon")
             version, _ = winreg.QueryValueEx(key, "version")
             return version
         except:
             return "Unknown"
     
-    def get_firefox_history(self) -> List[Dict[str, Any]]:
-        """Firefox 브라우저 히스토리를 수집합니다."""
+    def get_edge_history(self, incremental: bool = True) -> List[Dict[str, Any]]:
+        """Edge 브라우저 히스토리를 수집합니다."""
         history_data = []
         
         try:
-            firefox_path = self.browser_paths['firefox']['path']
-            if not os.path.exists(firefox_path):
+            edge_path = self.browser_paths['edge']['path']
+            if not os.path.exists(edge_path):
                 return history_data
             
-            # Firefox 프로필 폴더 찾기
-            profiles = [d for d in os.listdir(firefox_path) if d.endswith('.default')]
-            if not profiles:
-                return history_data
-            
-            profile_path = os.path.join(firefox_path, profiles[0])
-            places_path = os.path.join(profile_path, 'places.sqlite')
-            
-            if not os.path.exists(places_path):
-                return history_data
-            
-            # Firefox 히스토리 파일 복사
+            # Edge 히스토리 파일 복사 (사용 중인 파일이므로)
             import shutil
-            temp_path = f"{places_path}_temp"
-            shutil.copy2(places_path, temp_path)
+            temp_path = f"{edge_path}_temp"
+            shutil.copy2(edge_path, temp_path)
             
             conn = sqlite3.connect(temp_path)
             cursor = conn.cursor()
             
-            cursor.execute("""
-                SELECT url, title, visit_count, last_visit_date
-                FROM moz_places WHERE last_visit_date IS NOT NULL
-                ORDER BY last_visit_date DESC LIMIT 1000
-            """)
+            # 증분 수집을 위해 마지막 수집 시간 이후의 히스토리만 가져오기
+            if incremental:
+                last_collection_time = self.sqlite_meta.get_last_browser_collection_time(self.user_id, 'Edge')
+                if last_collection_time:
+                    # Edge 시간 형식으로 변환 (Chrome과 동일한 형식)
+                    edge_timestamp = int((last_collection_time - datetime(1601, 1, 1)).total_seconds() * 1000000)
+                    cursor.execute("""
+                        SELECT url, title, visit_count, last_visit_time, typed_count
+                        FROM urls 
+                        WHERE last_visit_time > ?
+                        ORDER BY last_visit_time DESC LIMIT 1000
+                    """, (edge_timestamp,))
+                else:
+                    cursor.execute("""
+                        SELECT url, title, visit_count, last_visit_time, typed_count
+                        FROM urls ORDER BY last_visit_time DESC LIMIT 1000
+                    """)
+            else:
+                cursor.execute("""
+                    SELECT url, title, visit_count, last_visit_time, typed_count
+                    FROM urls ORDER BY last_visit_time DESC LIMIT 1000
+                """)
             
             for row in cursor.fetchall():
-                url, title, visit_count, last_visit_date = row
+                url, title, visit_count, last_visit_time, typed_count = row
                 
-                # Firefox 시간을 datetime으로 변환
-                firefox_time = datetime.fromtimestamp(last_visit_date / 1000000)
+                # Edge 시간을 datetime으로 변환 (Chrome과 동일한 형식)
+                edge_time = datetime(1601, 1, 1) + timedelta(microseconds=last_visit_time)
+                
+                # 중복 체크 (URL + 방문 시간 조합)
+                history_key = f"{url}_{edge_time.timestamp()}"
+                if history_key in self.history_cache:
+                    continue
+                
+                # 데이터베이스에서 중복 확인
+                if self.sqlite_meta.is_browser_history_duplicate(self.user_id, url, edge_time):
+                    continue
+                
+                self.history_cache.add(history_key)
                 
                 history_data.append({
                     'user_id': self.user_id,
-                    'browser_name': 'Firefox',
-                    'browser_version': self.get_firefox_version(),
+                    'browser_name': 'Edge',
+                    'browser_version': self.get_edge_version(),
                     'url': url,
                     'title': title,
                     'visit_count': visit_count,
-                    'visit_time': firefox_time,
-                    'last_visit_time': firefox_time,
-                    'page_transition': 'link',
+                    'visit_time': edge_time,
+                    'last_visit_time': edge_time,
+                    'page_transition': 'typed' if typed_count > 0 else 'link',
                     'recorded_at': datetime.utcnow()
                 })
             
@@ -432,32 +869,32 @@ class BrowserHistoryCollector:
             os.remove(temp_path)
             
         except Exception as e:
-            print(f"Firefox 히스토리 수집 오류: {e}")
+            print(f"Edge 히스토리 수집 오류: {e}")
             
         return history_data
     
-    def get_firefox_version(self) -> str:
-        """Firefox 버전을 가져옵니다."""
+    def get_edge_version(self) -> str:
+        """Edge 버전을 가져옵니다."""
         try:
             import winreg
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
-                               r"SOFTWARE\Mozilla\Mozilla Firefox")
-            version, _ = winreg.QueryValueEx(key, "CurrentVersion")
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                                r"Software\Microsoft\Edge\BLBeacon")
+            version, _ = winreg.QueryValueEx(key, "version")
             return version
         except:
             return "Unknown"
     
-    def collect_all_browser_history(self) -> List[Dict[str, Any]]:
+    def collect_all_browser_history(self, incremental: bool = True) -> List[Dict[str, Any]]:
         """모든 브라우저의 히스토리를 수집합니다."""
         all_history = []
         
         # Chrome 히스토리
-        chrome_history = self.get_chrome_history()
+        chrome_history = self.get_chrome_history(incremental)
         all_history.extend(chrome_history)
         
-        # Firefox 히스토리
-        firefox_history = self.get_firefox_history()
-        all_history.extend(firefox_history)
+        # Edge 히스토리
+        edge_history = self.get_edge_history(incremental)
+        all_history.extend(edge_history)
         
         return all_history
     
@@ -468,7 +905,7 @@ class BrowserHistoryCollector:
         # RAG 시스템 초기화
         try:
             repo = Repository()
-            embedder = ColQwen2Embedder.load()
+            embedder = ColQwen2Embedder()
         except Exception as e:
             print(f"RAG 시스템 초기화 오류: {e}")
             repo = None
@@ -545,11 +982,12 @@ class BrowserHistoryCollector:
             return "unknown"
 
 class ActiveApplicationCollector:
+    # ... (변경 없음)
     """실행 중인 애플리케이션 정보를 수집하는 클래스"""
     
     def __init__(self, user_id: int):
         self.user_id = user_id
-        self.sqlite_meta = SQLiteMeta()  # 변경됨: self.db_session = get_db_session() -> self.sqlite_meta = SQLiteMeta()
+        self.sqlite_meta = SQLiteMeta()
         self.app_categories = {
             'productivity': ['word', 'excel', 'powerpoint', 'outlook', 'notepad', 'wordpad'],
             'development': ['code', 'pycharm', 'intellij', 'eclipse', 'visual studio', 'sublime'],
@@ -631,13 +1069,16 @@ class ActiveApplicationCollector:
         return saved_count
 
 class ScreenActivityCollector:
+    # ... (변경 없음)
     """화면 활동을 수집하고 분석하는 클래스"""
     
     def __init__(self, user_id: int):
         self.user_id = user_id
         self.sqlite_meta = SQLiteMeta()
         self.screenshot_dir = Path("uploads/screenshots")
-        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+        # 폴더가 존재하지 않을 때만 생성
+        if not self.screenshot_dir.exists():
+            self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         
         # LLM 초기화
         self.llm = self._initialize_llm()
@@ -778,7 +1219,7 @@ JSON 응답만 제공해주세요:
         try:
             # RAG 시스템 초기화
             repo = Repository()
-            embedder = ColQwen2Embedder.load()
+            embedder = ColQwen2Embedder()
             
             # 1. SQLite 메타데이터에 저장
             doc_id = f"screen_{hash(file_path)}"
@@ -822,6 +1263,7 @@ JSON 응답만 제공해주세요:
             print(f"화면 활동 RAG 인덱싱 오류: {e}")
 
 class DataCollectionManager:
+    # ... (변경 없음)
     """전체 데이터 수집을 관리하는 클래스"""
     
     def __init__(self, user_id: int):
@@ -833,18 +1275,86 @@ class DataCollectionManager:
         
         self.running = False
         self.collection_thread = None
+        self.initial_collection_done = False
+        
+        # 진행률 추적용 속성 추가
+        self.progress = 0.0
+        self.progress_message = "초기화 중..."
+        
+        # 선택된 폴더 목록
+        self.selected_folders = None
+        
+        # 폴더 선택 상태 관리
+        self.folders_selected = False  # 사용자가 폴더를 선택했는지 여부
+        self.waiting_for_folder_selection = True  # 폴더 선택을 기다리고 있는지 여부
     
-    def start_collection(self):
+    def start_collection(self, selected_folders: Optional[List[str]] = None):
         """데이터 수집을 시작합니다."""
         if self.running:
             return
+        
+        # 선택된 폴더 설정
+        self.selected_folders = selected_folders
+        
+        # 폴더 선택 상태 업데이트
+        if selected_folders is not None:
+            self.folders_selected = True
+            self.waiting_for_folder_selection = False
+            print(f"폴더 선택 완료: {len(selected_folders)}개 폴더")
+        else:
+            # selected_folders가 None이면 전체 C드라이브 스캔을 의미
+            self.folders_selected = True
+            self.waiting_for_folder_selection = False
+            print("전체 C드라이브 스캔 모드로 설정")
+        
+        # 초기 데이터 수집 수행 (폴더가 선택된 경우에만)
+        if not self.initial_collection_done and self.folders_selected:
+            self.perform_initial_collection()
         
         self.running = True
         self.collection_thread = threading.Thread(target=self._collection_loop)
         self.collection_thread.daemon = True
         self.collection_thread.start()
         
-        print(f"사용자 {self.user_id}의 데이터 수집이 시작되었습니다.")
+        folder_info = f" (선택된 폴더: {len(selected_folders)}개)" if selected_folders else " (전체 C드라이브)"
+        print(f"사용자 {self.user_id}의 데이터 수집이 시작되었습니다{folder_info}.")
+    
+    def perform_initial_collection(self):
+        """프로그램 시작 시 초기 데이터 수집을 수행합니다."""
+        print(f"사용자 {self.user_id}의 초기 데이터 수집을 시작합니다...")
+        
+        try:
+            # 1. 파일 수집 (전체 수집) - 전체 진행률의 80% 할당
+            self.progress_message = "📁 초기 파일 수집 중..."
+            print(self.progress_message)
+            # manager 인스턴스(self)를 전달하여 진행률을 업데이트하도록 함
+            files = self.file_collector.collect_files_from_drive(incremental=False, manager=self, selected_folders=self.selected_folders)
+            
+            # 2. 브라우저 히스토리 수집 (전체 진행률의 15% 할당)
+            self.progress = 80.0
+            self.progress_message = "🌐 초기 브라우저 히스토리 수집 중..."
+            print(self.progress_message)
+            history = self.browser_collector.collect_all_browser_history(incremental=False)
+            
+            # 3. 데이터베이스 저장 (전체 진행률의 5% 할당)
+            self.progress = 95.0
+            self.progress_message = "💾 데이터베이스에 저장 중..."
+            print(self.progress_message)
+            saved_files = self.file_collector.save_files_to_db(files)
+            print(f"✅ 파일 수집 완료: {saved_files}개 저장")
+            saved_history = self.browser_collector.save_browser_history_to_db(history)
+            print(f"✅ 브라우저 히스토리 수집 완료: {saved_history}개 저장")
+            
+            self.progress = 100.0
+            self.progress_message = "🎉 초기 데이터 수집 완료!"
+            print(self.progress_message)
+            
+        except Exception as e:
+            print(f"❌ 초기 데이터 수집 중 오류 발생: {e}")
+            self.progress_message = "오류 발생"
+        finally:
+            # 완료 플래그를 마지막에 설정
+            self.initial_collection_done = True
     
     def stop_collection(self):
         """데이터 수집을 중지합니다."""
@@ -864,10 +1374,15 @@ class DataCollectionManager:
             try:
                 current_time = time.time()
                 
-                # 파일 수집 (1시간마다)
-                if current_time - last_file_collection >= 3600:
+                # 파일 수집 (1시간마다) - 폴더가 선택된 경우에만
+                if current_time - last_file_collection >= 3600 and self.folders_selected:
                     self._collect_files()
                     last_file_collection = current_time
+                elif not self.folders_selected and self.waiting_for_folder_selection:
+                    # 폴더 선택을 기다리는 중이면 메시지 출력 (최초 1회만)
+                    if last_file_collection == 0:
+                        print("폴더 선택을 기다리는 중입니다. 우클릭 → '폴더 선택'을 통해 수집할 폴더를 선택하세요.")
+                        last_file_collection = current_time  # 메시지 중복 출력 방지
                 
                 # 브라우저 히스토리 수집 (30분마다)
                 if current_time - last_browser_collection >= 1800:
@@ -891,20 +1406,20 @@ class DataCollectionManager:
                 time.sleep(30)  # 오류 발생 시 30초 대기
     
     def _collect_files(self):
-        """파일 수집"""
+        """파일 수집 (증분 수집)"""
         try:
             print("파일 수집 시작...")
-            files = self.file_collector.collect_files_from_drive()
+            files = self.file_collector.collect_files_from_drive(incremental=True, selected_folders=self.selected_folders)
             saved_count = self.file_collector.save_files_to_db(files)
             print(f"파일 수집 완료: {saved_count}개 저장")
         except Exception as e:
             print(f"파일 수집 오류: {e}")
     
     def _collect_browser_history(self):
-        """브라우저 히스토리 수집"""
+        """브라우저 히스토리 수집 (증분 수집)"""
         try:
             print("브라우저 히스토리 수집 시작...")
-            history = self.browser_collector.collect_all_browser_history()
+            history = self.browser_collector.collect_all_browser_history(incremental=True)
             saved_count = self.browser_collector.save_browser_history_to_db(history)
             print(f"브라우저 히스토리 수집 완료: {saved_count}개 저장")
         except Exception as e:
@@ -956,14 +1471,30 @@ class DataCollectionManager:
 # 전역 데이터 수집 관리자들
 data_collection_managers = {}
 
-def start_user_data_collection(user_id: int):
+def start_user_data_collection(user_id: int, selected_folders: Optional[List[str]] = None):
     """사용자 데이터 수집을 시작합니다."""
     if user_id not in data_collection_managers:
         manager = DataCollectionManager(user_id)
         data_collection_managers[user_id] = manager
-        manager.start_collection()
+        
+        # 폴더 선택이 있으면 데이터 수집 시작, 없으면 대기 상태로 설정
+        if selected_folders is not None:
+            manager.start_collection(selected_folders)
+        else:
+            # 폴더 선택 없이 호출된 경우, 대기 상태로 설정
+            manager.running = True
+            manager.collection_thread = threading.Thread(target=manager._collection_loop)
+            manager.collection_thread.daemon = True
+            manager.collection_thread.start()
+            print(f"사용자 {user_id}의 데이터 수집 시스템이 대기 상태로 시작되었습니다.")
+            print("폴더 선택을 기다리는 중입니다. 우클릭 → '폴더 선택'을 통해 수집할 폴더를 선택하세요.")
     else:
-        print(f"사용자 {user_id}의 데이터 수집이 이미 실행 중입니다.")
+        # 이미 실행 중인 경우, 폴더 선택이 있으면 업데이트
+        manager = data_collection_managers[user_id]
+        if selected_folders is not None:
+            manager.start_collection(selected_folders)
+        else:
+            print(f"사용자 {user_id}의 데이터 수집이 이미 실행 중입니다.")
 
 def stop_user_data_collection(user_id: int):
     """사용자 데이터 수집을 중지합니다."""

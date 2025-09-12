@@ -1,3 +1,12 @@
+import os
+import sys
+from pathlib import Path
+
+# 현재 스크립트의 상위 디렉토리(backend)를 Python 경로에 추가
+backend_dir = Path(__file__).parent.parent.absolute()
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
 from typing import Dict, Any, Optional, List, Annotated, Sequence, TypedDict, TYPE_CHECKING
 from pydantic import BaseModel
 from langchain_community.chat_models import ChatOpenAI
@@ -55,12 +64,20 @@ class LangGraphSupervisor:
     def _initialize_llm(self):
         """LLM을 초기화합니다."""
         try:
+            print(f" GEMINI_API_KEY 확인: {settings.GEMINI_API_KEY[:10]}..." if settings.GEMINI_API_KEY else "❌ GEMINI_API_KEY 없음")
+            
             # Gemini API 우선 사용
             if settings.GEMINI_API_KEY:
+                print("🚀 Gemini API 초기화 시도...")
                 genai.configure(api_key=settings.GEMINI_API_KEY)
-                return genai.GenerativeModel(settings.GEMINI_MODEL)
+                model = genai.GenerativeModel(settings.GEMINI_MODEL)
+                print("✅ Gemini API 초기화 성공")
+                return model
+            else:
+                print("❌ GEMINI_API_KEY가 설정되지 않았습니다.")
+                return None
         except Exception as e:
-            print(f"LLM 초기화 오류: {e}")
+            print(f"❌ LLM 초기화 오류: {e}")
             return None
     
     def _create_agent_graph(self) -> StateGraph:
@@ -126,6 +143,11 @@ class LangGraphSupervisor:
     async def _analyze_intent_with_llm(self, user_input: str) -> Dict[str, Any]:
         """LLM을 사용하여 사용자 의도를 분석합니다 (여러 에이전트 지원)."""
         try:
+            # LLM이 초기화되지 않은 경우 기본 응답 반환
+            if self.llm is None:
+                print("LLM이 초기화되지 않았습니다. 기본 의도 분석을 사용합니다.")
+                return self._fallback_intent_analysis(user_input)
+            
             # LLM 프롬프트 생성
             prompt = self._create_llm_intent_prompt(user_input)
             
@@ -147,7 +169,41 @@ class LangGraphSupervisor:
             
         except Exception as e:
             print(f"LLM 의도 분석 오류: {e}")
-            return {}
+            return self._fallback_intent_analysis(user_input)
+
+    def _fallback_intent_analysis(self, user_input: str) -> Dict[str, Any]:
+        """LLM이 없을 때의 기본 의도 분석"""
+        user_input_lower = user_input.lower()
+        
+        # 키워드 기반 의도 분석
+        if any(keyword in user_input_lower for keyword in ['코드', '프로그래밍', '개발', '함수', '클래스', '변수']):
+            return {
+                "intent": "coding",
+                "confidence": 0.8,
+                "reasoning": "코딩 관련 키워드가 감지되었습니다.",
+                "selected_agents": ["coding_agent"]
+            }
+        elif any(keyword in user_input_lower for keyword in ['대시보드', '차트', '그래프', '데이터', '분석']):
+            return {
+                "intent": "dashboard",
+                "confidence": 0.8,
+                "reasoning": "대시보드 관련 키워드가 감지되었습니다.",
+                "selected_agents": ["dashboard_agent"]
+            }
+        elif any(keyword in user_input_lower for keyword in ['추천', '추천해', '추천해줘', '어떤', '뭐가 좋을까']):
+            return {
+                "intent": "recommendation",
+                "confidence": 0.8,
+                "reasoning": "추천 관련 키워드가 감지되었습니다.",
+                "selected_agents": ["recommendation_agent"]
+            }
+        else:
+            return {
+                "intent": "chat",
+                "confidence": 0.6,
+                "reasoning": "기본 채팅 의도로 분류되었습니다.",
+                "selected_agents": ["chatbot"]
+            }
 
     def _create_llm_intent_prompt(self, user_input: str) -> str:
         """LLM 의도 분석을 위한 프롬프트를 생성합니다."""

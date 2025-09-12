@@ -29,6 +29,7 @@ def _load_config(config_path: str = "configs.yaml") -> Dict[str, Any]:
     """설정 로드"""
     try:
         if os.path.exists(config_path):
+            logger.info(f"설정 파일 로드: {config_path}")
             with open(config_path, 'r', encoding='utf-8') as f:
                 return yaml.safe_load(f)
         else:
@@ -73,7 +74,7 @@ def _get_embedder() -> ColQwen2Embedder:
         with _lock:
             if _embedder is None:
                 device = "cuda" if _is_cuda_available() else "cpu"
-                _embedder = ColQwen2Embedder.load(device=device)
+                _embedder = ColQwen2Embedder(device=device)
     return _embedder
 
 def _get_config() -> Dict[str, Any]:
@@ -126,15 +127,9 @@ def process(state: Dict[str, Any]) -> Dict[str, Any]:
         k_candidates = config.get('retrieval', {}).get('k_candidates', 40)
         k_final = config.get('retrieval', {}).get('k_final', 10)
         
-        # 필터 설정
+        # 필터 설정 (user_id 필터 제거)
         filters = state.get("filters", {})
-        if state.get("user_id"):
-            if 'must' not in filters:
-                filters['must'] = []
-            filters['must'].append({
-                'key': 'user_id',
-                'match': {'value': state['user_id']}
-            })
+        # user_id 필터를 제거하여 모든 데이터에서 검색
         
         # 시간 범위 설정
         time_range = state.get("time_hint")
@@ -161,8 +156,13 @@ def process(state: Dict[str, Any]) -> Dict[str, Any]:
         image_candidates = []
         for candidate in candidates:
             if candidate.get('source') in ['file', 'screen'] and candidate.get('path'):
-                # 이미지 파일 경로가 있는 경우
-                image_candidates.append(candidate)
+                path = candidate.get('path')
+                # 파일 확장자 확인하여 실제 이미지 파일만 선별
+                if path:
+                    file_ext = os.path.splitext(path)[1].lower()
+                    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico'}
+                    if file_ext in image_extensions:
+                        image_candidates.append(candidate)
         
         # 3. MonoVLM 재랭킹 (이미지가 있는 경우)
         if image_candidates:
@@ -173,13 +173,20 @@ def process(state: Dict[str, Any]) -> Dict[str, Any]:
                 for candidate in image_candidates:
                     path = candidate.get('path')
                     if path and os.path.exists(path):
-                        try:
-                            from PIL import Image
-                            img = Image.open(path)
-                            images.append(img)
-                            image_paths.append(path)
-                        except Exception as e:
-                            logger.warning(f"이미지 로드 실패 {path}: {e}")
+                        # 파일 확장자 확인하여 이미지 파일만 처리
+                        file_ext = os.path.splitext(path)[1].lower()
+                        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico'}
+                        
+                        if file_ext in image_extensions:
+                            try:
+                                from PIL import Image
+                                img = Image.open(path)
+                                images.append(img)
+                                image_paths.append(path)
+                            except Exception as e:
+                                logger.warning(f"이미지 로드 실패 {path}: {e}")
+                        else:
+                            logger.debug(f"이미지가 아닌 파일 건너뜀: {path} (확장자: {file_ext})")
                 
                 if images:
                     # base64 변환

@@ -1,5 +1,7 @@
+#sqlite_meta.py
 import sqlite3
 import os
+import re  # <--- 1. 정규 표현식 모듈 추가
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import logging
@@ -9,14 +11,60 @@ logger = logging.getLogger(__name__)
 class SQLiteMeta:
     """SQLite 메타데이터 관리 클래스"""
     
-    def __init__(self, db_path: str = "./var/meta.db"):
-        self.db_path = db_path
+    # <--- 2. 파일 경로를 안전하게 만드는 내부 메서드 추가
+    def _sanitize_path(self, path: str) -> str:
+        """경로에서 유효하지 않은 문자들을 '_'로 대체하여 안전하게 만듭니다."""
+        # Windows 및 기타 OS에서 일반적으로 금지되는 문자를 제거합니다.
+        directory = os.path.dirname(path)
+        filename = os.path.basename(path)
+        
+        sanitized_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        
+        # 디렉토리가 있을 경우, 정제된 파일명과 다시 합칩니다.
+        if directory:
+            return os.path.join(directory, sanitized_filename)
+        return sanitized_filename
+
+    def __init__(self, db_path: str = "./sqlite/meta.db"):
+        # <--- 3. 전달받은 db_path를 즉시 정제하여 사용
+        self.db_path = self._sanitize_path(db_path)
         self._ensure_db_dir()
         self._init_db()
+        # 트랜잭션을 위한 연결 객체
+        self.conn = None
+        self._init_connection()
+    
+    def _init_connection(self):
+        """트랜잭션을 위한 연결 초기화"""
+        try:
+            self.conn = sqlite3.connect(self.db_path)
+            # 성능 최적화 설정
+            self.conn.execute("PRAGMA journal_mode=WAL")  # WAL 모드로 성능 향상
+            self.conn.execute("PRAGMA synchronous=NORMAL")  # 동기화 최적화
+            self.conn.execute("PRAGMA cache_size=10000")  # 캐시 크기 증가
+            self.conn.execute("PRAGMA temp_store=MEMORY")  # 임시 테이블을 메모리에 저장
+        except Exception as e:
+            logger.error(f"SQLite 연결 초기화 오류: {e}")
+            self.conn = None
+    
+    def close_connection(self):
+        """연결 종료"""
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+    
+    def __del__(self):
+        """소멸자에서 연결 정리"""
+        self.close_connection()
     
     def _ensure_db_dir(self):
         """데이터베이스 디렉토리 생성"""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        # db_path가 비어있는 엣지 케이스 방지
+        if os.path.dirname(self.db_path):
+            db_dir = os.path.dirname(self.db_path)
+            # 폴더가 존재하지 않을 때만 생성
+            if not os.path.exists(db_dir):
+                os.makedirs(db_dir, exist_ok=True)
     
     def _init_db(self):
         """데이터베이스 초기화 및 테이블 생성"""
@@ -100,6 +148,7 @@ class SQLiteMeta:
                     file_size INTEGER,
                     file_type TEXT,
                     file_category TEXT,
+                    file_hash TEXT,
                     content_preview TEXT,
                     created_date INTEGER,
                     modified_date INTEGER,
@@ -185,11 +234,47 @@ class SQLiteMeta:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_screenshots_user_id ON collected_screenshots(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_screenshots_captured_at ON collected_screenshots(captured_at)")
             
+            # 데이터베이스 마이그레이션 실행
+            self._migrate_database(conn)
+            
             conn.commit()
     
+    def _migrate_database(self, conn):
+        """데이터베이스 마이그레이션 실행"""
+        try:
+            # collected_files 테이블에 file_hash 컬럼이 없으면 추가
+            cursor = conn.execute("PRAGMA table_info(collected_files)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'file_hash' not in columns:
+                logger.info("collected_files 테이블에 file_hash 컬럼 추가 중...")
+                conn.execute("ALTER TABLE collected_files ADD COLUMN file_hash TEXT")
+                logger.info("file_hash 컬럼 추가 완료")
+            
+            # collected_files 테이블에 content_preview 컬럼이 없으면 추가
+            if 'content_preview' not in columns:
+                logger.info("collected_files 테이블에 content_preview 컬럼 추가 중...")
+                conn.execute("ALTER TABLE collected_files ADD COLUMN content_preview TEXT")
+                logger.info("content_preview 컬럼 추가 완료")
+            
+            # collected_files 테이블에 processed 컬럼이 없으면 추가
+            if 'processed' not in columns:
+                logger.info("collected_files 테이블에 processed 컬럼 추가 중...")
+                conn.execute("ALTER TABLE collected_files ADD COLUMN processed BOOLEAN DEFAULT FALSE")
+                logger.info("processed 컬럼 추가 완료")
+            
+            # collected_files 테이블에 processing_error 컬럼이 없으면 추가
+            if 'processing_error' not in columns:
+                logger.info("collected_files 테이블에 processing_error 컬럼 추가 중...")
+                conn.execute("ALTER TABLE collected_files ADD COLUMN processing_error TEXT")
+                logger.info("processing_error 컬럼 추가 완료")
+                
+        except Exception as e:
+            logger.error(f"데이터베이스 마이그레이션 오류: {e}")
+    
     def upsert_file(self, doc_id: str, path: str, mime: str = None, size: int = None,
-                   created_at: int = None, updated_at: int = None, accessed_at: int = None,
-                   category: str = None, preview: str = None) -> bool:
+                    created_at: int = None, updated_at: int = None, accessed_at: int = None,
+                    category: str = None, preview: str = None) -> bool:
         """파일 정보 업서트"""
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -205,16 +290,17 @@ class SQLiteMeta:
             return False
     
     def insert_web_history(self, url: str, title: str = None, visited_at: int = None,
-                          transition: str = None, browser: str = None, version: str = None,
-                          domain: str = None, duration_sec: int = None, tab_title: str = None) -> bool:
+                           visit_count: int = 1, transition: str = None, browser: str = None, 
+                           version: str = None, domain: str = None, duration_sec: int = None, 
+                           tab_title: str = None) -> bool:
         """웹 히스토리 삽입"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
                     INSERT INTO web_history 
-                    (url, title, visited_at, transition, browser, version, domain, duration_sec, tab_title)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (url, title, visited_at, transition, browser, version, domain, duration_sec, tab_title))
+                    (url, title, visited_at, visit_count, transition, browser, version, domain, duration_sec, tab_title)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (url, title, visited_at, visit_count, transition, browser, version, domain, duration_sec, tab_title))
                 conn.commit()
                 return True
         except Exception as e:
@@ -222,7 +308,7 @@ class SQLiteMeta:
             return False
     
     def insert_app(self, name: str, pid: int = None, cpu: float = None, mem: float = None,
-                  started_at: int = None, window_title: str = None, category: str = None) -> bool:
+                   started_at: int = None, window_title: str = None, category: str = None) -> bool:
         """앱 정보 삽입"""
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -238,9 +324,9 @@ class SQLiteMeta:
             return False
     
     def insert_screenshot(self, doc_id: str, path: str, captured_at: int = None,
-                         app_name: str = None, window_title: str = None, hash: str = None,
-                         ocr: str = None, gemini_desc: str = None, category: str = None,
-                         confidence: float = None) -> bool:
+                          app_name: str = None, window_title: str = None, hash: str = None,
+                          ocr: str = None, gemini_desc: str = None, category: str = None,
+                          confidence: float = None) -> bool:
         """스크린샷 정보 삽입"""
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -364,8 +450,8 @@ class SQLiteMeta:
                 conn.execute("""
                     INSERT INTO collected_files 
                     (user_id, file_path, file_name, file_size, file_type, file_category, 
-                     content_preview, created_date, modified_date, accessed_date, discovered_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     file_hash, content_preview, created_date, modified_date, accessed_date, discovered_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     file_info['user_id'],
                     file_info['file_path'],
@@ -373,6 +459,7 @@ class SQLiteMeta:
                     file_info['file_size'],
                     file_info['file_type'],
                     file_info['file_category'],
+                    file_info.get('file_hash', ''),
                     file_info.get('content_preview', ''),
                     int(file_info['created_date'].timestamp()) if file_info.get('created_date') else None,
                     int(file_info['modified_date'].timestamp()) if file_info.get('modified_date') else None,
@@ -563,3 +650,73 @@ class SQLiteMeta:
         except Exception as e:
             logger.error(f"파일 경로 조회 오류: {e}")
             return None
+    
+    # === 중복 방지 및 증분 수집을 위한 메서드들 ===
+    
+    def is_file_hash_exists(self, file_hash: str) -> bool:
+        """파일 해시가 이미 존재하는지 확인"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT 1 FROM collected_files WHERE file_hash = ? LIMIT 1", (file_hash,))
+                return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"파일 해시 중복 체크 오류: {e}")
+            return False
+    
+    def get_file_last_modified(self, file_path: str) -> Optional[datetime]:
+        """파일의 마지막 수정 시간 조회"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT modified_date FROM collected_files WHERE file_path = ? ORDER BY discovered_at DESC LIMIT 1", (file_path,))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    return datetime.fromtimestamp(row[0])
+                return None
+        except Exception as e:
+            logger.error(f"파일 수정 시간 조회 오류: {e}")
+            return None
+    
+    def is_browser_history_duplicate(self, user_id: int, url: str, visit_time: datetime) -> bool:
+        """브라우저 히스토리 중복 확인"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("""
+                    SELECT 1 FROM collected_browser_history 
+                    WHERE user_id = ? AND url = ? AND visit_time = ? 
+                    LIMIT 1
+                """, (user_id, url, int(visit_time.timestamp())))
+                return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"브라우저 히스토리 중복 체크 오류: {e}")
+            return False
+    
+    def get_last_browser_collection_time(self, user_id: int, browser_name: str) -> Optional[datetime]:
+        """마지막 브라우저 히스토리 수집 시간 조회"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("""
+                    SELECT MAX(recorded_at) FROM collected_browser_history 
+                    WHERE user_id = ? AND browser_name = ?
+                """, (user_id, browser_name))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    return datetime.fromtimestamp(row[0])
+                return None
+        except Exception as e:
+            logger.error(f"마지막 브라우저 수집 시간 조회 오류: {e}")
+            return None
+    
+    def update_file_hash(self, file_path: str, file_hash: str) -> bool:
+        """파일 해시 업데이트"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    UPDATE collected_files 
+                    SET file_hash = ? 
+                    WHERE file_path = ?
+                """, (file_hash, file_path))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"파일 해시 업데이트 오류: {e}")
+            return False

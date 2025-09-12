@@ -25,10 +25,10 @@ class Hit:
 class Repository:
     """Qdrant + SQLite 통합 Repository"""
     
-    def __init__(self, config_path: str = "configs.yaml"):
+    def __init__(self, config_path: str = "./backend/configs.yaml"):
         self.config = self._load_config(config_path)
         self.qdrant = QdrantManager(config_path)
-        self.sqlite = SQLiteMeta(self.config.get('sqlite', {}).get('path', './var/meta.db'))
+        self.sqlite = SQLiteMeta(self.config.get('sqlite', {}).get('path', './sqlite/meta.db'))
         self.collections = self.config['qdrant']['collections']
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
@@ -48,7 +48,7 @@ class Repository:
                         }
                     },
                     'sqlite': {
-                        'path': './var/meta.db'
+                        'path': './sqlite/meta.db'
                     }
                 }
         except Exception as e:
@@ -63,7 +63,7 @@ class Repository:
                     }
                 },
                 'sqlite': {
-                    'path': './var/meta.db'
+                    'path': './sqlite/meta.db'
                 }
             }
     
@@ -303,3 +303,67 @@ class Repository:
     
     def find_file_by_path(self, path: str):
         return self.sqlite.find_file_by_path(path)
+    
+    def index_text_chunks_batch(self, doc_ids: List[str], vectors: np.ndarray, metas: List[Dict[str, Any]], batch_size: int = 50) -> bool:
+        """텍스트 청크 배치 인덱싱"""
+        try:
+            collection = self.collections['text']
+            
+            # 배치로 나누어 처리
+            for i in range(0, len(vectors), batch_size):
+                batch_vectors = vectors[i:i + batch_size]
+                batch_metas = metas[i:i + batch_size]
+                batch_doc_ids = doc_ids[i:i + batch_size]
+                
+                ids = [f"{doc_id}_{j}" for j, doc_id in enumerate(batch_doc_ids)]
+                
+                # 메타데이터에 기본 정보 추가
+                for j, meta in enumerate(batch_metas):
+                    meta.update({
+                        'source': 'file',
+                        'doc_id': batch_doc_ids[j],
+                        'chunk_id': j
+                    })
+                
+                success = self.qdrant.upsert_vectors(collection, ids, batch_vectors, batch_metas)
+                if not success:
+                    print(f"배치 {i//batch_size + 1} 인덱싱 실패")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"텍스트 청크 배치 인덱싱 오류: {e}")
+            return False
+
+    def index_image_patches_batch(self, doc_ids: List[str], vectors: np.ndarray, metas: List[Dict[str, Any]], batch_size: int = 50) -> bool:
+        """이미지 패치 배치 인덱싱"""
+        try:
+            collection = self.collections['image']
+            
+            # 배치로 나누어 처리
+            for i in range(0, len(vectors), batch_size):
+                batch_vectors = vectors[i:i + batch_size]
+                batch_metas = metas[i:i + batch_size]
+                batch_doc_ids = doc_ids[i:i + batch_size]
+                
+                ids = [f"{doc_id}_{j}" for j, doc_id in enumerate(batch_doc_ids)]
+                
+                # 메타데이터에 기본 정보 추가
+                for j, meta in enumerate(batch_metas):
+                    meta.update({
+                        'source': 'file',
+                        'doc_id': batch_doc_ids[j],
+                        'patch_id': j
+                    })
+                
+                success = self.qdrant.upsert_vectors(collection, ids, batch_vectors, batch_metas)
+                if not success:
+                    print(f"배치 {i//batch_size + 1} 인덱싱 실패")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"이미지 패치 배치 인덱싱 오류: {e}")
+            return False

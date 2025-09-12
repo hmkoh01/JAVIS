@@ -94,8 +94,26 @@ class QdrantManager:
             # PointStruct 리스트 생성
             points = []
             for i, (id_val, vector, payload) in enumerate(zip(ids, vectors, payloads)):
+                # Point ID를 정수로 변환
+                if isinstance(id_val, str):
+                    # 문자열을 해시하여 정수로 변환
+                    point_id = abs(hash(id_val)) % (2**63 - 1)  # 64비트 정수 범위 내
+                else:
+                    point_id = int(id_val)
+                
+                # 벡터 데이터 평면화 (중첩된 리스트인 경우)
+                if isinstance(vector, list) and len(vector) > 0:
+                    if isinstance(vector[0], list):
+                        # 2차원 리스트인 경우 첫 번째 요소 사용
+                        vector = vector[0]
+                
+                # 벡터가 올바른 형태인지 확인
+                if not isinstance(vector, list) or not all(isinstance(x, (int, float)) for x in vector):
+                    logger.error(f"잘못된 벡터 형태: {type(vector)}, 길이: {len(vector) if hasattr(vector, '__len__') else 'N/A'}")
+                    continue
+                
                 point = PointStruct(
-                    id=id_val,
+                    id=point_id,
                     vector=vector,
                     payload=payload
                 )
@@ -124,6 +142,17 @@ class QdrantManager:
             # numpy 배열을 리스트로 변환
             if isinstance(query_vec, np.ndarray):
                 query_vec = query_vec.tolist()
+            
+            # 벡터 데이터 평면화 (중첩된 리스트인 경우)
+            if isinstance(query_vec, list) and len(query_vec) > 0:
+                if isinstance(query_vec[0], list):
+                    # 2차원 리스트인 경우 첫 번째 요소 사용
+                    query_vec = query_vec[0]
+            
+            # 벡터가 올바른 형태인지 확인
+            if not isinstance(query_vec, list) or not all(isinstance(x, (int, float)) for x in query_vec):
+                logger.error(f"잘못된 벡터 형태: {type(query_vec)}, 길이: {len(query_vec) if hasattr(query_vec, '__len__') else 'N/A'}")
+                return []
             
             # 필터 변환
             search_filter = None

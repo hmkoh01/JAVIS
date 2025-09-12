@@ -1,40 +1,41 @@
 import os
 import yaml
-from typing import List, Union, Optional
+from typing import List, Union
 import numpy as np
 import torch
 from PIL import Image
 import logging
 
-# Optional imports
+# 필요한 라이브러리 임포트
 try:
-    from transformers import AutoTokenizer, AutoModel
-    TRANSFORMERS_AVAILABLE = True
+    from transformers.utils.import_utils import is_flash_attn_2_available
+    from colpali_engine.models import ColQwen2, ColQwen2Processor
+    COLPALI_AVAILABLE = True
 except ImportError:
-    TRANSFORMERS_AVAILABLE = False
-    print("Warning: transformers not available")
+    COLPALI_AVAILABLE = False
+    # colpali-engine이 없을 경우를 대비한 가짜 클래스 정의
+    class ColQwen2: pass
+    class ColQwen2Processor: pass
+    def is_flash_attn_2_available(): return False
 
-try:
-    from byaldi import RAGMultiModalModel
-    BYALDI_AVAILABLE = True
-except ImportError:
-    BYALDI_AVAILABLE = False
-    print("Warning: byaldi not available")
 
 logger = logging.getLogger(__name__)
 
 class ColQwen2Embedder:
-    """ColQwen2 기반 멀티모달 임베더"""
+    """ColQwen2 기반 멀티모달 임베더 (colpali-engine 사용)"""
     
-    def __init__(self, device: str = "cuda", config_path: str = "configs.yaml"):
+    def __init__(self, model_name: str = "vidore/colqwen2-v1.0", device: str = "cuda", config_path: str = "configs.yaml"):
+        if not COLPALI_AVAILABLE:
+            raise ImportError("ColQwen2Embedder를 사용하려면 'colpali-engine'을 설치해야 합니다. pip install git+https://github.com/illuin-tech/colpali")
+
         self.device = device if torch.cuda.is_available() else "cpu"
         self.config = self._load_config(config_path)
         self.dim = self.config.get('embedding', {}).get('dim', 128)
         self.batch_size = self.config.get('embedding', {}).get('batch_size', 32)
         
-        # ColQwen2 모델 로드
+        self.model_name = model_name
         self.model = None
-        self.tokenizer = None
+        self.processor = None
         self._load_model()
     
     def _load_config(self, config_path: str) -> dict:
@@ -43,179 +44,213 @@ class ColQwen2Embedder:
             if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     return yaml.safe_load(f)
-            else:
-                return {
-                    'embedding': {
-                        'dim': 128,
-                        'batch_size': 32
-                    }
-                }
+            return {}
         except Exception as e:
             logger.error(f"설정 로드 오류: {e}")
-            return {
-                'embedding': {
-                    'dim': 128,
-                    'batch_size': 32
-                }
-            }
-    
+            return {}
+
     def _load_model(self):
-        """ColQwen2 모델 로드"""
-        if not BYALDI_AVAILABLE and not TRANSFORMERS_AVAILABLE:
-            logger.warning("Neither byaldi nor transformers available. Using dummy model.")
-            self.model = None
-            self.tokenizer = None
-            return
-            
+        """ColQwen2 모델과 프로세서를 로드"""
         try:
-            # Byaldi를 사용한 ColQwen2 모델 로드
-            if BYALDI_AVAILABLE:
-                self.model = RAGMultiModalModel.from_pretrained("vidore/colqwen2-v1.0")
-                logger.info("ColQwen2 모델 로드 완료")
-            elif TRANSFORMERS_AVAILABLE:
-                # 폴백: 기본 ColQwen2 모델 사용
-                model_name = "Qwen/ColQwen2-1.5B"
-                self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-                self.model = AutoModel.from_pretrained(model_name)
-                self.model.to(self.device)
-                logger.info("기본 ColQwen2 모델 로드 완료")
-            else:
-                logger.warning("No embedding model available")
-                self.model = None
-                self.tokenizer = None
+            logger.info(f"'{self.model_name}' 모델 로딩 중...")
+            
+            # 성능 최적화를 위한 설정
+            attn_implementation = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
+
+            self.processor = ColQwen2Processor.from_pretrained(self.model_name)
+            self.model = ColQwen2.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.bfloat16,
+                device_map=self.device,
+                attn_implementation=attn_implementation,
+            ).eval()
+            
+            logger.info("✅ ColQwen2 모델 및 프로세서 로드 완료")
+
         except Exception as e:
             logger.error(f"ColQwen2 모델 로드 오류: {e}")
-            logger.warning("Using dummy model")
+            logger.warning("모델이 로드되지 않았습니다. 더미 임베딩이 반환됩니다.")
             self.model = None
-            self.tokenizer = None
-    
-    @classmethod
-    def load(cls, device: str = "cuda", config_path: str = "configs.yaml") -> "ColQwen2Embedder":
-        """클래스 메서드로 임베더 로드"""
-        return cls(device, config_path)
-    
-    def encode_text(self, x: Union[str, List[str]]) -> np.ndarray:
-        """텍스트 인코딩"""
+            self.processor = None
+            
+    def encode_text(self, texts: List[str]) -> np.ndarray:
+        """텍스트 목록을 인코딩하여 각 텍스트에 대한 '하나의' 평균 임베딩 벡터 목록을 반환"""
+        if self.model is None or self.processor is None:
+            logger.error("모델이 로드되지 않았습니다. ColQwen2 모델을 먼저 로드해주세요.")
+            raise RuntimeError("ColQwen2 모델이 로드되지 않았습니다.")
+
+        all_avg_embeddings = []
         try:
-            if isinstance(x, str):
-                x = [x]
-            
-            # 모델이 없는 경우 더미 임베딩 반환
-            if self.model is None:
-                logger.warning("No model available, returning dummy embeddings")
-                return np.random.rand(len(x), self.dim)
-            
-            # Byaldi 모델 사용
-            if hasattr(self.model, 'encode_text'):
-                embeddings = []
-                for i in range(0, len(x), self.batch_size):
-                    batch = x[i:i + self.batch_size]
-                    with torch.no_grad():
-                        batch_embeddings = self.model.encode_text(batch)
-                        if isinstance(batch_embeddings, torch.Tensor):
-                            batch_embeddings = batch_embeddings.cpu().numpy()
-                        embeddings.append(batch_embeddings)
-                
-                if embeddings:
-                    return np.vstack(embeddings)
-                else:
-                    return np.zeros((len(x), self.dim))
-            
-            # 기본 ColQwen2 모델 사용
-            elif self.tokenizer is not None:
-                embeddings = []
-                for i in range(0, len(x), self.batch_size):
-                    batch = x[i:i + self.batch_size]
-                    inputs = self.tokenizer(batch, padding=True, truncation=True, 
-                                          return_tensors="pt", max_length=512)
-                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                    
-                    with torch.no_grad():
-                        outputs = self.model(**inputs)
-                        # 마지막 히든 상태의 평균 사용
-                        batch_embeddings = outputs.last_hidden_state.mean(dim=1)
-                        embeddings.append(batch_embeddings.cpu().numpy())
-                
-                if embeddings:
-                    return np.vstack(embeddings)
-                else:
-                    return np.zeros((len(x), self.dim))
-            else:
-                logger.warning("No tokenizer available, returning dummy embeddings")
-                return np.random.rand(len(x), self.dim)
-                    
+            for i in range(0, len(texts), self.batch_size):
+                batch_texts = texts[i:i + self.batch_size]
+                processed_inputs = self.processor.process_queries(batch_texts).to(self.device)
+
+                with torch.no_grad():
+                    # multi-vector embeddings (batch_size, num_tokens, dim)
+                    multi_vector_embeddings = self.model(**processed_inputs)
+
+                # 배치 내 각 항목에 대해 평균 벡터 계산
+                # (batch_size, dim)
+                avg_embeddings = torch.mean(multi_vector_embeddings, dim=1)
+                all_avg_embeddings.append(avg_embeddings.cpu().float().numpy())
+
+            if not all_avg_embeddings:
+                return np.zeros((0, self.dim), dtype=np.float32)
+
+            return np.vstack(all_avg_embeddings)
+
         except Exception as e:
             logger.error(f"텍스트 인코딩 오류: {e}")
-            return np.random.rand(len(x) if isinstance(x, list) else 1, self.dim)
+            raise RuntimeError(f"텍스트 인코딩 실패: {e}")
     
-    def encode_image_patches(self, image: Union[Image.Image, np.ndarray]) -> np.ndarray:
-        """이미지 패치 인코딩"""
+    def encode_images(self, images: List[Union[Image.Image, np.ndarray]]) -> np.ndarray:
+        """이미지 목록을 인코딩하여 각 이미지에 대한 '하나의' 평균 임베딩 벡터 목록을 반환"""
+        if self.model is None or self.processor is None:
+            logger.error("모델이 로드되지 않았습니다. ColQwen2 모델을 먼저 로드해주세요.")
+            raise RuntimeError("ColQwen2 모델이 로드되지 않았습니다.")
+
+        pil_images = [Image.fromarray(img) if isinstance(img, np.ndarray) else img for img in images]
+
+        all_avg_embeddings = []
         try:
-            # 모델이 없는 경우 더미 임베딩 반환
-            if self.model is None:
-                logger.warning("No model available, returning dummy image embeddings")
-                return np.random.rand(1, self.dim)
-            
-            # PIL Image로 변환
-            if isinstance(image, np.ndarray):
-                image = Image.fromarray(image)
-            
-            # 이미지 크기 조정 (필요시)
-            if image.size[0] > 448 or image.size[1] > 448:
-                image.thumbnail((448, 448), Image.Resampling.LANCZOS)
-            
-            # Byaldi 모델 사용
-            if hasattr(self.model, 'encode_image'):
+            for i in range(0, len(pil_images), self.batch_size):
+                batch_images = pil_images[i:i + self.batch_size]
+                processed_inputs = self.processor.process_images(batch_images).to(self.device)
+
                 with torch.no_grad():
-                    embeddings = self.model.encode_image([image])
-                    if isinstance(embeddings, torch.Tensor):
-                        embeddings = embeddings.cpu().numpy()
-                    return embeddings
-            
-            # 기본 ColQwen2 모델 사용 (패치 분할)
-            else:
-                return self._encode_image_patches_fallback(image)
-                
+                    multi_vector_embeddings = self.model(**processed_inputs)
+
+                avg_embeddings = torch.mean(multi_vector_embeddings, dim=1)
+                all_avg_embeddings.append(avg_embeddings.cpu().float().numpy())
+
+            if not all_avg_embeddings:
+                return np.zeros((0, self.dim), dtype=np.float32)
+
+            return np.vstack(all_avg_embeddings)
+
         except Exception as e:
-            logger.error(f"이미지 패치 인코딩 오류: {e}")
-            return np.random.rand(1, self.dim)
-    
-    def _encode_image_patches_fallback(self, image: Image.Image) -> np.ndarray:
-        """기본 모델을 사용한 이미지 패치 인코딩 (폴백)"""
-        try:
-            # 14x14 그리드로 패치 분할
-            patch_size = 32
-            width, height = image.size
-            
-            patches = []
-            for y in range(0, height, patch_size):
-                for x in range(0, width, patch_size):
-                    patch = image.crop((x, y, min(x + patch_size, width), min(y + patch_size, height)))
-                    patches.append(patch)
-            
-            # 각 패치를 인코딩
-            patch_embeddings = []
-            for i in range(0, len(patches), self.batch_size):
-                batch_patches = patches[i:i + self.batch_size]
-                
-                # 패치들을 텍스트로 변환 (간단한 방법)
-                batch_texts = [f"image patch {j}" for j in range(len(batch_patches))]
-                batch_embeddings = self.encode_text(batch_texts)
-                patch_embeddings.append(batch_embeddings)
-            
-            if patch_embeddings:
-                return np.vstack(patch_embeddings)
-            else:
-                return np.zeros((1, self.dim))
-                
-        except Exception as e:
-            logger.error(f"이미지 패치 폴백 인코딩 오류: {e}")
-            return np.zeros((1, self.dim))
+            logger.error(f"이미지 인코딩 오류: {e}")
+            raise RuntimeError(f"이미지 인코딩 실패: {e}")
     
     def encode_query(self, query: str) -> np.ndarray:
-        """쿼리 인코딩 (텍스트와 동일하지만 별도 메서드로 제공)"""
-        return self.encode_text(query)
+        multi_vector_embeddings = self.encode_text([query])
+        logger.debug(f"multi_vector_embeddings shape: {multi_vector_embeddings.shape}")
+        if multi_vector_embeddings.ndim == 3 and multi_vector_embeddings.shape[0] == 1:
+            avg_embedding = np.mean(multi_vector_embeddings[0], axis=0)
+            logger.debug(f"avg_embedding shape: {avg_embedding.shape}")
+            return avg_embedding
+
+        # 예외적인 경우, 원래 결과 반환
+        return multi_vector_embeddings
     
     def get_embedding_dim(self) -> int:
         """임베딩 차원 반환"""
         return self.dim
+    
+    def encode_text_batch(self, texts: List[str], batch_size: int = None) -> np.ndarray:
+        """텍스트 목록을 배치로 인코딩 (성능 최적화)"""
+        if batch_size is None:
+            batch_size = self.batch_size
+        
+        if self.model is None or self.processor is None:
+            logger.error("모델이 로드되지 않았습니다. ColQwen2 모델을 먼저 로드해주세요.")
+            raise RuntimeError("ColQwen2 모델이 로드되지 않았습니다.")
+
+        all_avg_embeddings = []
+        try:
+            for i in range(0, len(texts), batch_size):
+                batch_texts = texts[i:i + batch_size]
+                processed_inputs = self.processor.process_queries(batch_texts).to(self.device)
+
+                with torch.no_grad():
+                    # multi-vector embeddings (batch_size, num_tokens, dim)
+                    multi_vector_embeddings = self.model(**processed_inputs)
+
+                # 배치 내 각 항목에 대해 평균 벡터 계산
+                # (batch_size, dim)
+                avg_embeddings = torch.mean(multi_vector_embeddings, dim=1)
+                all_avg_embeddings.append(avg_embeddings.cpu().float().numpy())
+
+            if not all_avg_embeddings:
+                return np.zeros((0, self.dim), dtype=np.float32)
+
+            return np.vstack(all_avg_embeddings)
+
+        except Exception as e:
+            logger.error(f"텍스트 배치 인코딩 오류: {e}")
+            raise RuntimeError(f"텍스트 배치 인코딩 실패: {e}")
+    
+    def encode_image_batch(self, images: List[Image.Image], batch_size: int = None) -> np.ndarray:
+        """이미지 목록을 배치로 인코딩 (성능 최적화)"""
+        if batch_size is None:
+            batch_size = self.batch_size
+        
+        if self.model is None or self.processor is None:
+            logger.error("모델이 로드되지 않았습니다. ColQwen2 모델을 먼저 로드해주세요.")
+            raise RuntimeError("ColQwen2 모델이 로드되지 않았습니다.")
+
+        all_avg_embeddings = []
+        try:
+            for i in range(0, len(images), batch_size):
+                batch_images = images[i:i + batch_size]
+                processed_inputs = self.processor.process_images(batch_images).to(self.device)
+
+                with torch.no_grad():
+                    multi_vector_embeddings = self.model(**processed_inputs)
+
+                avg_embeddings = torch.mean(multi_vector_embeddings, dim=1)
+                all_avg_embeddings.append(avg_embeddings.cpu().float().numpy())
+
+            if not all_avg_embeddings:
+                return np.zeros((0, self.dim), dtype=np.float32)
+
+            return np.vstack(all_avg_embeddings)
+
+        except Exception as e:
+            logger.error(f"이미지 배치 인코딩 오류: {e}")
+            raise RuntimeError(f"이미지 배치 인코딩 실패: {e}")
+    
+    def encode_image_patches(self, image: Union[Image.Image, np.ndarray]) -> np.ndarray:
+        """단일 이미지를 패치 단위로 인코딩하여 여러 임베딩 벡터를 반환"""
+        if self.model is None or self.processor is None:
+            logger.error("모델이 로드되지 않았습니다. ColQwen2 모델을 먼저 로드해주세요.")
+            raise RuntimeError("ColQwen2 모델이 로드되지 않았습니다.")
+
+        try:
+            # PIL Image로 변환
+            if isinstance(image, np.ndarray):
+                pil_image = Image.fromarray(image)
+            else:
+                pil_image = image
+
+            # 이미지를 패치로 분할 (예: 2x2 = 4개 패치)
+            width, height = pil_image.size
+            patch_size = min(width, height) // 2  # 간단한 패치 크기 계산
+            
+            patches = []
+            for i in range(0, height, patch_size):
+                for j in range(0, width, patch_size):
+                    # 패치 추출
+                    patch = pil_image.crop((j, i, min(j + patch_size, width), min(i + patch_size, height)))
+                    patches.append(patch)
+            
+            if not patches:
+                # 패치가 없으면 전체 이미지를 하나의 패치로 처리
+                patches = [pil_image]
+
+            # 패치들을 인코딩
+            processed_inputs = self.processor.process_images(patches).to(self.device)
+
+            with torch.no_grad():
+                # multi-vector embeddings (num_patches, num_tokens, dim)
+                multi_vector_embeddings = self.model(**processed_inputs)
+
+            # 각 패치에 대해 평균 벡터 계산
+            # (num_patches, dim)
+            avg_embeddings = torch.mean(multi_vector_embeddings, dim=1)
+            
+            return avg_embeddings.cpu().float().numpy()
+
+        except Exception as e:
+            logger.error(f"이미지 패치 인코딩 오류: {e}")
+            raise RuntimeError(f"이미지 패치 인코딩 실패: {e}")

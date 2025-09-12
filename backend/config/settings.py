@@ -1,6 +1,9 @@
 import os
 from typing import Optional
 from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class Settings(BaseSettings):
     # API 설정
@@ -11,7 +14,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./javis.db"
 
     # Gemini API 설정
-    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
     GEMINI_MODEL: str = "gemini-1.5-flash"
     
     # Multimodal RAG 설정
@@ -37,7 +40,14 @@ class Settings(BaseSettings):
     EMAIL_PASSWORD: Optional[str] = None
 
     # 로깅 설정
-    LOG_LEVEL: str = "INFO"
+    LOG_LEVEL: str = "DEBUG"  # DEBUG로 변경하여 더 자세한 로그 확인
+    LOG_FILE_PATH: str = "./backend/logs/javis.log"  # 로그 파일 경로 추가
+    LOG_MAX_SIZE: int = 10 * 1024 * 1024  # 10MB
+    LOG_BACKUP_COUNT: int = 5  # 백업 파일 개수
+    
+    # 서버 타임아웃 설정
+    REQUEST_TIMEOUT: int = 120  # 요청 타임아웃 (초)
+    KEEP_ALIVE_TIMEOUT: int = 5  # Keep-alive 타임아웃 (초)
     
     class Config:
         env_file = ".env"

@@ -9,6 +9,7 @@ from tkinter import ttk, scrolledtext
 import requests
 import json
 import threading
+import queue
 from datetime import datetime
 import os
 
@@ -29,6 +30,9 @@ class FloatingChatApp:
         # 드래그 관련 변수
         self.drag_data = {"x": 0, "y": 0, "dragging": False}
         
+        # 스레드 안전한 큐 시스템
+        self.message_queue = queue.Queue()
+        
         # 플로팅 버튼 생성
         self.create_floating_button()
         
@@ -40,6 +44,12 @@ class FloatingChatApp:
         
         # ESC 키로 채팅창 닫기
         self.root.bind('<Escape>', self.close_chat_window)
+        
+        # Ctrl+C로 복사 기능 (채팅창에서)
+        self.root.bind('<Control-c>', self.copy_selected_text)
+        
+        # 큐 처리 시작
+        self.process_message_queue()
     
     def setup_korean_fonts(self):
         """한글 폰트를 설정합니다."""
@@ -74,6 +84,29 @@ class FloatingChatApp:
         self.input_font = (self.default_font, 14)
         self.button_font = (self.default_font, 12, 'bold')
         self.emoji_font = (self.default_font, 22)
+    
+    def process_message_queue(self):
+        """메시지 큐를 주기적으로 확인하여 UI를 안전하게 업데이트합니다."""
+        try:
+            while True:
+                message = self.message_queue.get_nowait()
+                
+                if message['type'] == 'update_loading':
+                    self.update_loading_message(message['loading_text_widget'], message['text'])
+                elif message['type'] == 'handle_response':
+                    self.handle_bot_response(message['response'], message['loading_text_widget'])
+                    
+        except queue.Empty:
+            pass
+        except Exception as e:
+            print(f"큐 처리 중 오류: {e}")
+        finally:
+            # 메인 스레드에서 안전하게 재귀 호출
+            try:
+                self.root.after(100, self.process_message_queue)
+            except tk.TclError:
+                # 윈도우가 파괴된 경우 중지
+                return
         
     def create_floating_button(self):
         """플로팅 버튼 생성"""
@@ -196,8 +229,6 @@ class FloatingChatApp:
         """우클릭 컨텍스트 메뉴 표시"""
         # 팝업 메뉴 생성
         context_menu = tk.Menu(self.root, tearoff=0)
-        context_menu.add_command(label="옵션 설정", command=self.show_options)
-        context_menu.add_separator()
         context_menu.add_command(label="시스템 종료", command=self.quit_system)
         
         # 메뉴를 마우스 위치에 표시
@@ -206,12 +237,6 @@ class FloatingChatApp:
         finally:
             context_menu.grab_release()
             
-    def show_options(self):
-        """옵션 설정 창 표시 (현재는 선택지만 표시)"""
-        # 간단한 알림 창으로 옵션 설정 기능이 있다는 것을 표시
-        import tkinter.messagebox as messagebox
-        messagebox.showinfo("옵션 설정", "옵션 설정 기능은 현재 개발 중입니다.")
-        
     def quit_system(self):
         """시스템 종료"""
         # 종료 확인
@@ -284,6 +309,14 @@ class FloatingChatApp:
         
         self.messages_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         self.messages_canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # 마우스 휠 스크롤 바인딩
+        self.messages_canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.messages_canvas.bind("<Button-4>", self._on_mousewheel)  # Linux
+        self.messages_canvas.bind("<Button-5>", self._on_mousewheel)  # Linux
+        
+        # 캔버스에 포커스 설정 (스크롤을 위해)
+        self.messages_canvas.bind("<Button-1>", lambda e: self.messages_canvas.focus_set())
         
         self.messages_canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -360,26 +393,54 @@ class FloatingChatApp:
             self.root.deiconify()
             self.root.lift()
             self.root.focus_force()
+    
+    def _on_mousewheel(self, event):
+        """마우스 휠 스크롤 처리"""
+        # Windows와 macOS에서 delta 값이 다름
+        if event.delta:
+            delta = -1 * (event.delta / 120)  # Windows
+        else:
+            delta = -1 if event.num == 4 else 1  # Linux
+        
+        # 스크롤 실행
+        self.messages_canvas.yview_scroll(int(delta), "units")
         
     def add_user_message(self, message):
         """사용자 메시지 추가"""
         message_frame = tk.Frame(self.scrollable_frame, bg='white')
         message_frame.pack(fill='x', pady=8)
         
-        # 사용자 메시지 (우측 정렬)
-        user_label = tk.Label(
-            message_frame,
-            text=message,
+        # 사용자 메시지 컨테이너 (우측 정렬)
+        user_container = tk.Frame(message_frame, bg='white')
+        user_container.pack(side='right', padx=(100, 0))
+        
+        # 사용자 메시지 (Text 위젯으로 변경하여 텍스트 선택 가능)
+        user_text = tk.Text(
+            user_container,
             font=self.message_font,
             bg='#eef2ff',
             fg='#111827',
-            wraplength=350,
-            justify='left',
+            wrap='word',
+            width=35,
+            height=1,
+            relief='flat',
+            borderwidth=0,
             padx=15,
             pady=10,
-            relief='flat'
+            state='disabled',
+            cursor='arrow'
         )
-        user_label.pack(side='right', padx=(100, 0))
+        user_text.pack()
+        
+        # 텍스트 삽입 및 높이 자동 조정
+        user_text.config(state='normal')
+        user_text.insert('1.0', message)
+        user_text.config(state='disabled')
+        
+        # 텍스트 높이에 맞게 조정
+        user_text.update_idletasks()
+        text_height = user_text.tk.call((user_text, 'count', '-update', '-displaylines', '1.0', 'end'))
+        user_text.config(height=max(1, text_height))
         
         # 스크롤을 맨 아래로
         self.messages_canvas.update_idletasks()
@@ -390,40 +451,57 @@ class FloatingChatApp:
         message_frame = tk.Frame(self.scrollable_frame, bg='white')
         message_frame.pack(fill='x', pady=8)
         
-        # 봇 메시지 (좌측 정렬)
-        bot_label = tk.Label(
-            message_frame,
-            text="",
+        # 봇 메시지 컨테이너 (좌측 정렬)
+        bot_container = tk.Frame(message_frame, bg='white')
+        bot_container.pack(side='left', padx=(0, 100))
+        
+        # 봇 메시지 (Text 위젯으로 변경하여 텍스트 선택 가능)
+        bot_text = tk.Text(
+            bot_container,
             font=self.message_font,
             bg='#f3f4f6',
             fg='#111827',
-            wraplength=350,
-            justify='left',
+            wrap='word',
+            width=35,
+            height=1,
+            relief='flat',
+            borderwidth=0,
             padx=15,
             pady=10,
-            relief='flat'
+            state='disabled',
+            cursor='arrow'
         )
-        bot_label.pack(side='left', padx=(0, 100))
+        bot_text.pack()
         
         # 스크롤을 맨 아래로
         self.messages_canvas.update_idletasks()
         self.messages_canvas.yview_moveto(1)
         
         # 타이핑 애니메이션 시작
-        self.animate_typing(bot_label, message)
+        self.animate_typing(bot_text, message)
     
-    def animate_typing(self, label, full_text, current_index=0):
+    def animate_typing(self, text_widget, full_text, current_index=0):
         """타이핑 애니메이션을 실행합니다."""
         if current_index <= len(full_text):
             # 현재까지의 텍스트 표시
             current_text = full_text[:current_index]
-            label.config(text=current_text)
+            
+            # Text 위젯에 텍스트 삽입
+            text_widget.config(state='normal')
+            text_widget.delete('1.0', 'end')
+            text_widget.insert('1.0', current_text)
+            text_widget.config(state='disabled')
+            
+            # 텍스트 높이에 맞게 조정
+            text_widget.update_idletasks()
+            text_height = text_widget.tk.call((text_widget, 'count', '-update', '-displaylines', '1.0', 'end'))
+            text_widget.config(height=max(1, text_height))
             
             # 다음 글자로 진행
             if current_index < len(full_text):
                 # 타이핑 속도 조절 (밀리초)
                 typing_speed = 30  # 빠른 타이핑
-                self.root.after(typing_speed, lambda: self.animate_typing(label, full_text, current_index + 1))
+                self.root.after(typing_speed, lambda: self.animate_typing(text_widget, full_text, current_index + 1))
             
             # 스크롤을 맨 아래로 유지
             self.messages_canvas.update_idletasks()
@@ -434,42 +512,68 @@ class FloatingChatApp:
         message_frame = tk.Frame(self.scrollable_frame, bg='white')
         message_frame.pack(fill='x', pady=8)
         
-        # 로딩 메시지 (좌측 정렬)
-        loading_label = tk.Label(
-            message_frame,
-            text="답변을 생성하고 있습니다...",
+        # 로딩 메시지 컨테이너 (좌측 정렬)
+        loading_container = tk.Frame(message_frame, bg='white')
+        loading_container.pack(side='left', padx=(0, 100))
+        
+        # 로딩 메시지 (Text 위젯으로 변경)
+        loading_text = tk.Text(
+            loading_container,
             font=self.message_font,
             bg='#f3f4f6',
             fg='#6b7280',
-            wraplength=350,
-            justify='left',
+            wrap='word',
+            width=35,
+            height=1,
+            relief='flat',
+            borderwidth=0,
             padx=15,
             pady=10,
-            relief='flat'
+            state='disabled',
+            cursor='arrow'
         )
-        loading_label.pack(side='left', padx=(0, 100))
+        loading_text.pack()
+        
+        # 초기 텍스트 삽입
+        loading_text.config(state='normal')
+        loading_text.insert('1.0', "답변을 생성하고 있습니다...")
+        loading_text.config(state='disabled')
         
         # 로딩 애니메이션 시작
-        self.animate_loading(loading_label)
+        self.animate_loading(loading_text)
         
         # 스크롤을 맨 아래로
         self.messages_canvas.update_idletasks()
         self.messages_canvas.yview_moveto(1)
         
-        return loading_label
+        return loading_text
     
-    def animate_loading(self, label, dots=0):
+    def animate_loading(self, text_widget, dots=0):
         """로딩 애니메이션을 실행합니다."""
         dots_text = "." * (dots + 1)
-        label.config(text=f"답변을 생성하고 있습니다{dots_text}")
+        loading_text = f"답변을 생성하고 있습니다{dots_text}"
+        
+        # Text 위젯에 텍스트 삽입
+        text_widget.config(state='normal')
+        text_widget.delete('1.0', 'end')
+        text_widget.insert('1.0', loading_text)
+        text_widget.config(state='disabled')
         
         # 다음 애니메이션 프레임
-        self.root.after(500, lambda: self.animate_loading(label, (dots + 1) % 4))
+        self.root.after(500, lambda: self.animate_loading(text_widget, (dots + 1) % 4))
     
-    def remove_loading_message(self, loading_label):
+    def remove_loading_message(self, loading_text_widget):
         """로딩 메시지를 제거합니다."""
-        if loading_label and loading_label.winfo_exists():
-            loading_label.master.destroy()
+        if loading_text_widget and loading_text_widget.winfo_exists():
+            loading_text_widget.master.master.destroy()  # container의 부모인 message_frame 제거
+    
+    def update_loading_message(self, loading_text_widget, new_text):
+        """로딩 메시지를 업데이트합니다."""
+        if loading_text_widget and loading_text_widget.winfo_exists():
+            loading_text_widget.config(state='normal')
+            loading_text_widget.delete('1.0', 'end')
+            loading_text_widget.insert('1.0', new_text)
+            loading_text_widget.config(state='disabled')
     
     def send_message(self, event=None):
         """메시지 전송"""
@@ -484,48 +588,147 @@ class FloatingChatApp:
         self.add_user_message(message)
         
         # 로딩 메시지 표시
-        loading_label = self.show_loading_message()
+        loading_text_widget = self.show_loading_message()
         
         # 백그라운드에서 API 호출
-        threading.Thread(target=self.get_bot_response, args=(message, loading_label), daemon=True).start()
+        threading.Thread(target=self.get_bot_response, args=(message, loading_text_widget), daemon=True).start()
         
-    def get_bot_response(self, message, loading_label):
-        """봇 응답 가져오기"""
-        try:
-            # API 호출 - Supervisor 기반 처리
-            response = requests.post(
-                f"{self.API_BASE_URL}/api/v2/process",
-                json={"message": message, "user_id": 1},
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                # Supervisor 응답 구조에 맞게 처리
-                if result.get("success"):
-                    bot_response = result.get("content", "응답을 처리할 수 없습니다.")
-                else:
-                    bot_response = result.get("content", "처리 중 오류가 발생했습니다.")
-            else:
-                bot_response = f"Error: {response.status_code} - {response.text}"
+    def get_bot_response(self, message, loading_text_widget):
+        """봇 응답 가져오기 - 재시도 로직 포함"""
+        max_retries = 3
+        retry_delay = 2  # 초
+        timeout = 60  # 타임아웃을 30초에서 60초로 증가
+        
+        for attempt in range(max_retries):
+            try:
+                # API 호출 - Supervisor 기반 처리
+                response = requests.post(
+                    f"{self.API_BASE_URL}/api/v2/process",
+                    json={"message": message, "user_id": 1},
+                    timeout=timeout
+                )
                 
-        except Exception as e:
-            bot_response = "Sorry, I'm having trouble connecting to the server."
-            
-        # 메인 스레드에서 UI 업데이트
-        self.root.after(0, lambda: self.handle_bot_response(bot_response, loading_label))
+                if response.status_code == 200:
+                    result = response.json()
+                    # Supervisor 응답 구조에 맞게 처리
+                    if result.get("success"):
+                        bot_response = result.get("content", "응답을 처리할 수 없습니다.")
+                    else:
+                        bot_response = result.get("content", "처리 중 오류가 발생했습니다.")
+                    
+                    # 성공 시 즉시 반환
+                    self.root.after(0, lambda: self.handle_bot_response(bot_response, loading_text_widget))
+                    return
+                else:
+                    bot_response = f"Error: {response.status_code} - {response.text}"
+                    
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    # 재시도 전에 로딩 메시지 업데이트
+                    self.root.after(0, lambda: self.update_loading_message(loading_text_widget, f"서버 응답 대기 중... (재시도 {attempt + 2}/{max_retries})"))
+                    import time
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    bot_response = f"서버 응답 시간이 초과되었습니다. ({timeout}초 후 재시도 {max_retries}회 완료)"
+                    
+            except requests.exceptions.ConnectionError:
+                if attempt < max_retries - 1:
+                    # 재시도 전에 로딩 메시지 업데이트 (큐를 통해 안전하게)
+                    self.message_queue.put({
+                        'type': 'update_loading',
+                        'loading_text_widget': loading_text_widget,
+                        'text': f"서버 연결 시도 중... (재시도 {attempt + 2}/{max_retries})"
+                    })
+                    import time
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    bot_response = "서버에 연결할 수 없습니다. 서버가 실행 중인지 확인해주세요."
+                    
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    # 재시도 전에 로딩 메시지 업데이트 (큐를 통해 안전하게)
+                    self.message_queue.put({
+                        'type': 'update_loading',
+                        'loading_text_widget': loading_text_widget,
+                        'text': f"오류 발생, 재시도 중... (재시도 {attempt + 2}/{max_retries})"
+                    })
+                    import time
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    bot_response = f"연결 중 오류가 발생했습니다: {str(e)}"
+        
+        # 모든 재시도 실패 시 (큐를 통해 안전하게)
+        self.message_queue.put({
+            'type': 'handle_response',
+            'response': bot_response,
+            'loading_text_widget': loading_text_widget
+        })
     
-    def handle_bot_response(self, bot_response, loading_label):
+    def handle_bot_response(self, bot_response, loading_text_widget):
         """봇 응답을 처리합니다."""
         # 로딩 메시지 제거
-        self.remove_loading_message(loading_label)
+        self.remove_loading_message(loading_text_widget)
         
         # 타이핑 애니메이션으로 봇 메시지 표시
         self.add_bot_message(bot_response)
         
     def run(self):
         """애플리케이션 실행"""
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        except Exception as e:
+            print(f"애플리케이션 실행 중 오류: {e}")
+        finally:
+            # 애플리케이션 종료 시 정리
+            self.cleanup()
+    
+    def cleanup(self):
+        """애플리케이션 종료 시 정리 작업"""
+        try:
+            # 큐 정리
+            while not self.message_queue.empty():
+                try:
+                    self.message_queue.get_nowait()
+                except queue.Empty:
+                    break
+        except Exception as e:
+            print(f"정리 작업 중 오류: {e}")
+    
+    def copy_text(self, text_widget):
+        """선택된 텍스트를 클립보드에 복사"""
+        try:
+            # 선택된 텍스트가 있는지 확인
+            selected_text = text_widget.get(tk.SEL_FIRST, tk.SEL_LAST)
+            if selected_text:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(selected_text)
+        except tk.TclError:
+            # 선택된 텍스트가 없는 경우 전체 텍스트 복사
+            full_text = text_widget.get('1.0', 'end-1c')
+            self.root.clipboard_clear()
+            self.root.clipboard_append(full_text)
+    
+    def select_all_text(self, text_widget):
+        """텍스트 위젯의 모든 텍스트 선택"""
+        text_widget.config(state='normal')
+        text_widget.tag_add(tk.SEL, '1.0', 'end-1c')
+        text_widget.tag_config(tk.SEL, background='#0078d4', foreground='white')
+        text_widget.config(state='disabled')
+        text_widget.mark_set(tk.INSERT, '1.0')
+        text_widget.see(tk.INSERT)
+    
+    def copy_selected_text(self, event=None):
+        """현재 포커스된 텍스트 위젯에서 선택된 텍스트 복사"""
+        try:
+            # 현재 포커스된 위젯 확인
+            focused_widget = self.root.focus_get()
+            if isinstance(focused_widget, tk.Text):
+                self.copy_text(focused_widget)
+        except Exception as e:
+            print(f"복사 중 오류: {e}")
 
 def main():
     """메인 함수"""
