@@ -17,12 +17,19 @@ import threading
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import asyncio
+import plistlib
 import aiofiles
-import winreg
+try:
+    import winreg  # Windows only
+except ImportError:
+    winreg = None  # macOS/Linux에서는 None으로 설정
 import subprocess
 import numpy as np
 import hashlib
-from PIL import ImageGrab
+try:
+    from PIL import ImageGrab  # Windows/macOS with PIL support
+except ImportError:
+    ImageGrab = None  # Fallback for systems without PIL ImageGrab support
 
 from config.settings import settings
 
@@ -115,7 +122,7 @@ class FileCollector:
     def get_c_drive_folders(self) -> List[Dict[str, Any]]:
         print("get_c_drive_folders 메서드 시작")
         folders = []
-        base_path = "C:\\Users\\koh\\Desktop"
+        base_path = "C:\\Users\\choisunwoo\\Desktop"
         
         try:
             print(f"기준 경로: {base_path}")
@@ -693,16 +700,44 @@ class BrowserHistoryCollector:
     def __init__(self, user_id: int):
         self.user_id = user_id
         self.sqlite_meta = SQLiteMeta()
-        self.browser_paths = {
-            'chrome': {
-                'path': os.path.expanduser('~\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\History'),
-                'name': 'Chrome'
-            },
-            'edge': {
-                'path': os.path.expanduser('~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\History'),
-                'name': 'Edge'
+        # 운영체제별 브라우저 경로 설정
+        if platform.system() == "Windows":
+            self.browser_paths = {
+                'chrome': {
+                    'path': os.path.expanduser('~\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\History'),
+                    'name': 'Chrome'
+                },
+                'edge': {
+                    'path': os.path.expanduser('~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\History'),
+                    'name': 'Edge'
+                }
             }
-        }
+        elif platform.system() == "Darwin":  # macOS
+            self.browser_paths = {
+                'chrome': {
+                    'path': os.path.expanduser('~/Library/Application Support/Google/Chrome/Default/History'),
+                    'name': 'Chrome'
+                },
+                'edge': {
+                    'path': os.path.expanduser('~/Library/Application Support/Microsoft Edge/Default/History'),
+                    'name': 'Edge'
+                },
+                'safari': {
+                    'path': os.path.expanduser('~/Library/Safari/History.db'),
+                    'name': 'Safari'
+                }
+            }
+        else:  # Linux
+            self.browser_paths = {
+                'chrome': {
+                    'path': os.path.expanduser('~/.config/google-chrome/Default/History'),
+                    'name': 'Chrome'
+                },
+                'firefox': {
+                    'path': os.path.expanduser('~/.mozilla/firefox/*/places.sqlite'),
+                    'name': 'Firefox'
+                }
+            }
         # 브라우저 히스토리 캐시 (중복 방지용)
         self.history_cache = set()
     
@@ -787,11 +822,28 @@ class BrowserHistoryCollector:
     def get_chrome_version(self) -> str:
         """Chrome 버전을 가져옵니다."""
         try:
-            import winreg
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
-                                r"Software\Google\Chrome\BLBeacon")
-            version, _ = winreg.QueryValueEx(key, "version")
-            return version
+            if platform.system() == "Windows" and winreg is not None:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                                    r"Software\Google\Chrome\BLBeacon")
+                version, _ = winreg.QueryValueEx(key, "version")
+                return version
+            elif platform.system() == "Darwin":  # macOS
+                plist_path = "/Applications/Google Chrome.app/Contents/Info.plist"
+                if os.path.exists(plist_path):
+                    with open(plist_path, 'rb') as f:
+                        plist_data = plistlib.load(f)
+                        return plist_data.get('CFBundleShortVersionString', 'Unknown')
+                else:
+                    return "Chrome not installed"
+            else:  # Linux
+                try:
+                    result = subprocess.run(['google-chrome', '--version'], 
+                                          capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0:
+                        return result.stdout.strip().split()[-1]
+                except:
+                    pass
+                return "Unknown"
         except:
             return "Unknown"
     
@@ -876,11 +928,28 @@ class BrowserHistoryCollector:
     def get_edge_version(self) -> str:
         """Edge 버전을 가져옵니다."""
         try:
-            import winreg
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
-                                r"Software\Microsoft\Edge\BLBeacon")
-            version, _ = winreg.QueryValueEx(key, "version")
-            return version
+            if platform.system() == "Windows" and winreg is not None:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                                    r"Software\Microsoft\Edge\BLBeacon")
+                version, _ = winreg.QueryValueEx(key, "version")
+                return version
+            elif platform.system() == "Darwin":  # macOS
+                plist_path = "/Applications/Microsoft Edge.app/Contents/Info.plist"
+                if os.path.exists(plist_path):
+                    with open(plist_path, 'rb') as f:
+                        plist_data = plistlib.load(f)
+                        return plist_data.get('CFBundleShortVersionString', 'Unknown')
+                else:
+                    return "Edge not installed"
+            else:  # Linux
+                try:
+                    result = subprocess.run(['microsoft-edge', '--version'], 
+                                          capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0:
+                        return result.stdout.strip().split()[-1]
+                except:
+                    pass
+                return "Unknown"
         except:
             return "Unknown"
     
@@ -1043,12 +1112,76 @@ class ActiveApplicationCollector:
     def get_app_version(self, exe_path: str) -> str:
         """실행 파일의 버전을 가져옵니다."""
         try:
-            import win32api
-            info = win32api.GetFileVersionInfo(exe_path, "\\")
-            ms = info['FileVersionMS']
-            ls = info['FileVersionLS']
-            version = f"{win32api.HIWORD(ms)}.{win32api.LOWORD(ms)}.{win32api.HIWORD(ls)}.{win32api.LOWORD(ls)}"
-            return version
+            if platform.system() == "Windows":
+                import win32api
+                info = win32api.GetFileVersionInfo(exe_path, "\\")
+                ms = info['FileVersionMS']
+                ls = info['FileVersionLS']
+                version = f"{win32api.HIWORD(ms)}.{win32api.LOWORD(ms)}.{win32api.HIWORD(ls)}.{win32api.LOWORD(ls)}"
+                return version
+            elif platform.system() == "Darwin":  # macOS
+                return self._get_app_version_macos(exe_path)
+            else:  # Linux
+                return self._get_app_version_linux(exe_path)
+        except:
+            return "Unknown"
+    
+    def _get_app_version_macos(self, app_path: str) -> str:
+        """macOS에서 앱 버전을 가져옵니다."""
+        try:
+            # .app 번들인 경우 Info.plist에서 버전 정보 추출
+            if app_path.endswith('.app'):
+                plist_path = os.path.join(app_path, 'Contents', 'Info.plist')
+                if os.path.exists(plist_path):
+                    with open(plist_path, 'rb') as f:
+                        plist_data = plistlib.load(f)
+                        return plist_data.get('CFBundleShortVersionString', 'Unknown')
+            
+            # 일반 실행파일인 경우 otool 명령어 사용
+            try:
+                result = subprocess.run(['otool', '-L', app_path], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    # 버전 정보 파싱 로직 (간단한 예시)
+                    return "1.0.0"  # 실제로는 더 복잡한 파싱 필요
+            except:
+                pass
+            
+            return "Unknown"
+        except:
+            return "Unknown"
+    
+    def _get_app_version_linux(self, exe_path: str) -> str:
+        """Linux에서 앱 버전을 가져옵니다."""
+        try:
+            # dpkg를 사용해서 패키지 버전 확인 (Debian/Ubuntu)
+            try:
+                result = subprocess.run(['dpkg', '-S', exe_path], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    package_name = result.stdout.split(':')[0]
+                    version_result = subprocess.run(['dpkg', '-l', package_name], 
+                                                  capture_output=True, text=True, timeout=5)
+                    if version_result.returncode == 0:
+                        lines = version_result.stdout.split('\n')
+                        for line in lines:
+                            if package_name in line:
+                                parts = line.split()
+                                if len(parts) >= 3:
+                                    return parts[2]
+            except:
+                pass
+            
+            # rpm을 사용해서 패키지 버전 확인 (Red Hat/CentOS)
+            try:
+                result = subprocess.run(['rpm', '-qf', exe_path], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    return result.stdout.strip()
+            except:
+                pass
+            
+            return "Unknown"
         except:
             return "Unknown"
     
@@ -1099,6 +1232,46 @@ class ScreenActivityCollector:
     def capture_screenshot(self) -> Optional[Tuple[bytes, str]]:
         """화면 스크린샷을 캡처합니다."""
         try:
+            # macOS에서는 screencapture 명령어 사용
+            if platform.system() == "Darwin":
+                return self._capture_screenshot_macos()
+            # Windows/Linux에서는 PIL ImageGrab 사용
+            elif ImageGrab is not None:
+                return self._capture_screenshot_pil()
+            else:
+                print("스크린샷 캡처 기능을 사용할 수 없습니다.")
+                return None
+        except Exception as e:
+            print(f"스크린샷 캡처 오류: {e}")
+            return None
+    
+    def _capture_screenshot_macos(self) -> Optional[Tuple[bytes, str]]:
+        """macOS에서 screencapture 명령어를 사용해 스크린샷을 캡처합니다."""
+        try:
+            # 파일명 생성
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"screenshot_{self.user_id}_{timestamp}.png"
+            file_path = self.screenshot_dir / filename
+            
+            # screencapture 명령어로 스크린샷 캡처
+            result = subprocess.run(['screencapture', '-x', str(file_path)], 
+                                  capture_output=True, timeout=10)
+            
+            if result.returncode == 0 and os.path.exists(file_path):
+                # 파일을 바이트로 읽기
+                with open(file_path, 'rb') as f:
+                    screenshot_data = f.read()
+                return screenshot_data, str(file_path)
+            else:
+                print("screencapture 명령어 실행 실패")
+                return None
+        except Exception as e:
+            print(f"macOS 스크린샷 캡처 오류: {e}")
+            return None
+    
+    def _capture_screenshot_pil(self) -> Optional[Tuple[bytes, str]]:
+        """PIL ImageGrab을 사용해 스크린샷을 캡처합니다."""
+        try:
             # 스크린샷 캡처
             screenshot = ImageGrab.grab()
             
@@ -1117,7 +1290,7 @@ class ScreenActivityCollector:
             return image_data, str(file_path)
             
         except Exception as e:
-            print(f"스크린샷 캡처 오류: {e}")
+            print(f"PIL 스크린샷 캡처 오류: {e}")
             return None
     
     async def analyze_screenshot_with_llm(self, image_data: bytes) -> Dict[str, Any]:

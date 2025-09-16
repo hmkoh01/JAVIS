@@ -140,7 +140,7 @@ async def health_check():
 
 @router.get("/data-collection/folders")
 async def get_c_drive_folders():
-    """C:\\Users\\koh\\Desktop 폴더의 하위 폴더 목록을 조회합니다."""
+    """C:\\Users\\choisunwoo\\Desktop 폴더의 하위 폴더 목록을 조회합니다."""
     try:
         print("폴더 목록 조회 API 호출됨")
         from database.data_collector import FileCollector
@@ -149,7 +149,7 @@ async def get_c_drive_folders():
         print("FileCollector 인스턴스 생성 중...")
         file_collector = FileCollector(user_id=1)
         
-        print("C:\\Users\\koh\\Desktop 폴더 목록 조회 중...")
+        print("C:\\Users\\choisunwoo\\Desktop 폴더 목록 조회 중...")
         folders = file_collector.get_c_drive_folders()
         
         print(f"조회된 폴더 개수: {len(folders)}")

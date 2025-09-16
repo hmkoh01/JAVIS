@@ -108,7 +108,16 @@ class FolderSelector:
         subtitle_label.pack(anchor='w')
         desc_frame = tk.Frame(main_frame, bg='white')
         desc_frame.pack(fill='x', padx=30, pady=(0, 25))
-        desc_label = tk.Label(desc_frame, text="파일 수집할 폴더를 선택하세요.\nC:\\Users\\koh\\Desktop 폴더 내의 폴더들이 표시됩니다.\n선택하지 않으면 전체 폴더를 스캔합니다.", font=('Malgun Gothic', 12), bg='white', fg='#6b7280', wraplength=650, justify='left')
+        
+        desc_label = tk.Label(
+            desc_frame,
+            text="파일 수집할 폴더를 선택하세요.\nC:\\Users\\koh\\Desktop 폴더 내의 폴더들이 표시됩니다.\n선택하지 않으면 전체 폴더를 스캔합니다.",
+            font=('Malgun Gothic', 12),
+            bg='white',
+            fg='#6b7280',
+            wraplength=650,
+            justify='left'
+        )
         desc_label.pack(anchor='w')
         list_container = tk.Frame(main_frame, bg='white')
         list_container.pack(fill='both', expand=True, padx=30, pady=(0, 25))
@@ -234,7 +243,7 @@ class FolderSelector:
         
         loading_messages = [
             "⏳ 폴더를 검색하는 중입니다...",
-            "🔍 C:\\Users\\koh\\Desktop 폴더를 스캔하고 있습니다...",
+            "🔍 C:\\Users\\choisunwoo\\Desktop 폴더를 스캔하고 있습니다...",
             "📁 폴더 정보를 수집하는 중입니다...",
             "⏳ 잠시만 기다려주세요..."
         ]
@@ -248,7 +257,7 @@ class FolderSelector:
         # 이 함수는 사용자의 기존 코드와 동일합니다.
         loading_messages = [
             "⏳ 폴더를 검색하는 중입니다...",
-            "🔍 C:\\Users\\koh\\Desktop 폴더를 스캔하고 있습니다...",
+            "🔍 C:\\Users\\choisunwoo\\Desktop 폴더를 스캔하고 있습니다...",
             "📁 폴더 정보를 수집하는 중입니다...",
             "⏳ 잠시만 기다려주세요..."
         ]
