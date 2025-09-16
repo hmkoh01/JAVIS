@@ -235,12 +235,11 @@ datasets/
 .dockerignore
 docker-compose.override.yml
 
-JAVIS/javis/
-JAVIS/logs/
+# JAVIS specific directories
+javis/
+logs/
 uploads/
-JAVIS/backend/sqlite/
-JAVIS/sqlite/
-backend/logs/
+sqlite/
 
 # Kubernetes
 *.yaml
