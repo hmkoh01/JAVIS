@@ -51,7 +51,15 @@ def check_docker():
         return False
     except FileNotFoundError:
         print("❌ Docker 명령어를 찾을 수 없습니다.")
-        print("Docker를 설치하고 다시 시도하세요: https://docs.docker.com/get-docker/")
+        print("Docker가 설치되지 않았거나 PATH에 등록되지 않았습니다.")
+        print("\n💡 해결 방법:")
+        print("1. Docker를 설치하세요: https://docs.docker.com/get-docker/")
+        print("2. 설치 후 시스템을 재시작하세요")
+        print("3. 또는 다음 명령어로 설치하세요:")
+        print("   - Windows (Chocolatey): choco install docker-desktop")
+        print("   - macOS (Homebrew): brew install --cask docker")
+        print("   - Ubuntu: sudo apt-get install docker.io")
+        print("   - CentOS/RHEL: sudo yum install docker")
         return False
     except Exception as e:
         print(f"❌ Docker 확인 중 오류: {e}")
@@ -521,10 +529,15 @@ def main():
             if choice == 'y':
                 if not start_qdrant_server():
                     print("❌ Qdrant 서버 시작에 실패했습니다.")
-                    print("수동으로 다음 명령어를 실행하세요: docker run -p 6333:6333 qdrant/qdrant")
+                    print("\n💡 수동으로 다음 명령어를 실행하세요:")
+                    print("docker run -d --name qdrant -p 6333:6333 -p 6334:6334 -v qdrant_storage:/qdrant/storage qdrant/qdrant:latest")
             elif choice == 'n':
-                print("수동으로 다음 명령어를 실행하세요:")
-                print("docker run -p 6333:6333 qdrant/qdrant")
+                print("\n💡 수동으로 다음 명령어를 실행하세요:")
+                print("docker run -d --name qdrant -p 6333:6333 -p 6334:6334 -v qdrant_storage:/qdrant/storage qdrant/qdrant:latest")
+                print("\n📋 추가 명령어:")
+                print("- 컨테이너 상태 확인: docker ps")
+                print("- 컨테이너 중지: docker stop qdrant")
+                print("- 컨테이너 제거: docker rm qdrant")
             else:
                 print("⚠️ Qdrant 서버 없이 진행합니다. 벡터 검색 기능이 제한됩니다.")
     

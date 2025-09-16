@@ -235,6 +235,12 @@ datasets/
 .dockerignore
 docker-compose.override.yml
 
+javis/
+logs/
+uploads/
+sqlite/
+backend/logs/
+
 # Kubernetes
 *.yaml
 *.yml
