@@ -86,22 +86,36 @@ class FloatingChatApp:
         self.emoji_font = (self.default_font, 22)
     
     def process_message_queue(self):
-        """메시지 큐를 주기적으로 확인하여 UI를 안전하게 업데이트합니다."""
+        """메시지 큐를 처리합니다. - 메인 스레드에서만 GUI 업데이트"""
         try:
             while True:
-                message = self.message_queue.get_nowait()
-                
-                if message['type'] == 'update_loading':
-                    self.update_loading_message(message['loading_text_widget'], message['text'])
-                elif message['type'] == 'handle_response':
-                    self.handle_bot_response(message['response'], message['loading_text_widget'])
+                try:
+                    # 큐에서 메시지 가져오기 (논블로킹)
+                    message = self.message_queue.get_nowait()
                     
-        except queue.Empty:
-            pass
+                    if message['type'] == 'api_request':
+                        # 백그라운드 스레드에서 API 처리
+                        threading.Thread(
+                            target=self.process_api_request,
+                            args=(message['message'], message['loading_widget']),
+                            daemon=True
+                        ).start()
+                        
+                    elif message['type'] == 'bot_response':
+                        # 봇 응답 처리
+                        self.handle_bot_response(message['response'], message['loading_widget'])
+                        
+                    elif message['type'] == 'update_loading':
+                        # 로딩 메시지 업데이트
+                        self.update_loading_message(message['loading_widget'], message['message'])
+                        
+                except queue.Empty:
+                    break
+                    
         except Exception as e:
             print(f"큐 처리 중 오류: {e}")
         finally:
-            # 메인 스레드에서 안전하게 재귀 호출
+            # 100ms 후에 다시 큐 확인
             try:
                 self.root.after(100, self.process_message_queue)
             except tk.TclError:
@@ -590,10 +604,14 @@ class FloatingChatApp:
         # 로딩 메시지 표시
         loading_text_widget = self.show_loading_message()
         
-        # 백그라운드에서 API 호출
-        threading.Thread(target=self.get_bot_response, args=(message, loading_text_widget), daemon=True).start()
+        # 큐를 통해 API 요청 처리
+        self.message_queue.put({
+            'type': 'api_request',
+            'message': message,
+            'loading_widget': loading_text_widget
+        })
         
-    def get_bot_response(self, message, loading_text_widget):
+    def process_api_request(self, message, loading_text_widget):
         """봇 응답 가져오기 - 재시도 로직 포함"""
         max_retries = 3
         retry_delay = 2  # 초
@@ -616,56 +634,81 @@ class FloatingChatApp:
                     else:
                         bot_response = result.get("content", "처리 중 오류가 발생했습니다.")
                     
-                    # 성공 시 즉시 반환
-                    self.root.after(0, lambda: self.handle_bot_response(bot_response, loading_text_widget))
+                    # 큐를 통해 결과 전달
+                    self.message_queue.put({
+                        'type': 'bot_response',
+                        'response': bot_response,
+                        'loading_widget': loading_text_widget
+                    })
                     return
                 else:
-                    bot_response = f"Error: {response.status_code} - {response.text}"
+                    error_msg = f"Error: {response.status_code} - {response.text}"
+                    self.message_queue.put({
+                        'type': 'bot_response',
+                        'response': error_msg,
+                        'loading_widget': loading_text_widget
+                    })
+                    return
                     
             except requests.exceptions.Timeout:
                 if attempt < max_retries - 1:
-                    # 재시도 전에 로딩 메시지 업데이트
-                    self.root.after(0, lambda: self.update_loading_message(loading_text_widget, f"서버 응답 대기 중... (재시도 {attempt + 2}/{max_retries})"))
+                    # 재시도 메시지
+                    self.message_queue.put({
+                        'type': 'update_loading',
+                        'message': f"서버 응답 대기 중... (재시도 {attempt + 2}/{max_retries})",
+                        'loading_widget': loading_text_widget
+                    })
                     import time
                     time.sleep(retry_delay)
                     continue
                 else:
-                    bot_response = f"서버 응답 시간이 초과되었습니다. ({timeout}초 후 재시도 {max_retries}회 완료)"
+                    error_msg = f"서버 응답 시간이 초과되었습니다. ({timeout}초 후 재시도 {max_retries}회 완료)"
+                    self.message_queue.put({
+                        'type': 'bot_response',
+                        'response': error_msg,
+                        'loading_widget': loading_text_widget
+                    })
+                    return
                     
             except requests.exceptions.ConnectionError:
                 if attempt < max_retries - 1:
                     # 재시도 전에 로딩 메시지 업데이트 (큐를 통해 안전하게)
                     self.message_queue.put({
                         'type': 'update_loading',
-                        'loading_text_widget': loading_text_widget,
-                        'text': f"서버 연결 시도 중... (재시도 {attempt + 2}/{max_retries})"
+                        'message': f"서버 연결 시도 중... (재시도 {attempt + 2}/{max_retries})",
+                        'loading_widget': loading_text_widget
                     })
                     import time
                     time.sleep(retry_delay)
                     continue
                 else:
-                    bot_response = "서버에 연결할 수 없습니다. 서버가 실행 중인지 확인해주세요."
+                    error_msg = "서버에 연결할 수 없습니다. 서버가 실행 중인지 확인해주세요."
+                    self.message_queue.put({
+                        'type': 'bot_response',
+                        'response': error_msg,
+                        'loading_widget': loading_text_widget
+                    })
+                    return
                     
             except Exception as e:
                 if attempt < max_retries - 1:
                     # 재시도 전에 로딩 메시지 업데이트 (큐를 통해 안전하게)
                     self.message_queue.put({
                         'type': 'update_loading',
-                        'loading_text_widget': loading_text_widget,
-                        'text': f"오류 발생, 재시도 중... (재시도 {attempt + 2}/{max_retries})"
+                        'message': f"오류 발생, 재시도 중... (재시도 {attempt + 2}/{max_retries})",
+                        'loading_widget': loading_text_widget
                     })
                     import time
                     time.sleep(retry_delay)
                     continue
                 else:
-                    bot_response = f"연결 중 오류가 발생했습니다: {str(e)}"
-        
-        # 모든 재시도 실패 시 (큐를 통해 안전하게)
-        self.message_queue.put({
-            'type': 'handle_response',
-            'response': bot_response,
-            'loading_text_widget': loading_text_widget
-        })
+                    error_msg = f"연결 중 오류가 발생했습니다: {str(e)}"
+                    self.message_queue.put({
+                        'type': 'bot_response',
+                        'response': error_msg,
+                        'loading_widget': loading_text_widget
+                    })
+                    return
     
     def handle_bot_response(self, bot_response, loading_text_widget):
         """봇 응답을 처리합니다."""
